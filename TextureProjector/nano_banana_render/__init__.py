@@ -23,6 +23,8 @@ if "bpy" in locals():
         importlib.reload(operators)
     if "depth_utils" in locals():
         importlib.reload(depth_utils)
+    if "projection_utils" in locals():
+        importlib.reload(projection_utils)
     if "gemini_api" in locals():
         importlib.reload(gemini_api)
     if "threading_utils" in locals():
@@ -36,6 +38,7 @@ if "bpy" in locals():
 from . import ui_panel
 from . import operators
 from . import depth_utils
+from . import projection_utils
 from . import gemini_api
 from . import threading_utils
 from . import image_editor
@@ -92,6 +95,8 @@ core_classes = (
     operators.GEMINI_OT_history_context_menu,
     operators.GEMINI_OT_open_history_image,
     operators.GEMINI_OT_load_image_as_reference,
+    operators.GEMINI_OT_load_example_reference,
+    operators.GEMINI_OT_texture_projection,
     operators.GEMINI_OT_open_api_key_url,
     operators.GEMINI_OT_validate_api_key,
 )

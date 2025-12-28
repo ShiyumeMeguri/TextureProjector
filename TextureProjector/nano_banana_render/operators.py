@@ -3,10 +3,21 @@ from bpy.types import Operator
 from bpy.props import IntProperty, StringProperty
 from bpy_extras.io_utils import ImportHelper
 import os
+import shutil
 import tempfile
+import gpu
+import gpu.texture
+from gpu_extras.batch import batch_for_shader
+import bmesh
+import bpy_extras
+from bpy_extras import view3d_utils, object_utils
+import mathutils
+import numpy as np
+import threading
 from . import gemini_api
 from . import depth_utils
 from . import threading_utils
+from . import projection_utils
 
 class GEMINI_OT_ai_render(Operator):
     """AI Render operator - main functionality"""
@@ -58,7 +69,7 @@ class GEMINI_OT_ai_render(Operator):
             
             # Initialize components
             depth_renderer = depth_utils.DepthRenderer()
-            api_client = gemini_api.GeminiAPI(api_key)
+            api_client = gemini_api.GeminiAPI(api_key, model_name=props.model_name)
             
             # Update UI state BEFORE starting thread
             props.is_rendering = True
@@ -103,8 +114,6 @@ class GEMINI_OT_ai_render(Operator):
         
         # Check scene
         scene = context.scene
-        if not scene.camera:
-            return "No active camera found. Add a camera to the scene."
         
         # Check visible objects
         visible_objects = [obj for obj in scene.objects if obj.visible_get() and obj.type == 'MESH']
@@ -113,7 +122,235 @@ class GEMINI_OT_ai_render(Operator):
         
         # Note: clip values validation removed since normalize_depth was removed
         
-        return None  # No errors
+
+# Note: _validate_projection and bake_projection moved to projection_utils.py
+
+class GEMINI_OT_texture_projection(Operator):
+    """Deeply integrated AI Texture Projection"""
+    bl_idname = "gemini.texture_projection"
+    bl_label = "AI Texture Projection"
+    bl_description = "Capture viewport, project to mesh, and generate texture using AI"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    current_thread = None
+
+    @classmethod
+    def poll(cls, context):
+        try:
+            projection_utils.validate_projection(context)
+            return True
+        except:
+            return False
+
+    def execute(self, context):
+        scene = context.scene
+        props = scene.gemini_render
+        
+        # 1. Validation
+        try:
+            projection_utils.validate_projection(context)
+        except Exception as e:
+            self.report({'ERROR'}, str(e))
+            return {'CANCELLED'}
+
+        # Find 3D Viewport
+        viewport_area = next((a for a in context.screen.areas if a.type == 'VIEW_3D'), None)
+        if not viewport_area:
+            self.report({'ERROR'}, "No 3D Viewport found")
+            return {'CANCELLED'}
+        region = viewport_area.regions[-1]
+        space_data = next(s for s in viewport_area.spaces if s.type == 'VIEW_3D')
+        
+        # Native dimensions for UV calculation
+        v_width, v_height = region.width, region.height
+
+        # Store original settings
+        render_filepath = scene.render.filepath
+        render_format = scene.render.image_settings.file_format
+        original_show_overlays = space_data.overlay.show_overlays
+        original_shading_type = space_data.shading.type
+        
+        # Temporary directory for workspace
+        temp_dir = tempfile.mkdtemp(prefix="gemini_proj_")
+        init_img_path = os.path.join(temp_dir, "init.png")
+        depth_path = os.path.join(temp_dir, "depth_raw.png")
+        sim_path = os.path.join(temp_dir, "sim_grid.png")
+
+        # Configure for capture
+        space_data.overlay.show_overlays = False
+        scene.render.image_settings.file_format = 'PNG'
+        
+        try:
+            # A. Capture Color (Native Resolution)
+            print(f"[GEMINI] Capturing viewport color ({v_width}x{v_height})...")
+            props.status_text = "📸 Capturing viewport..."
+            scene.render.filepath = init_img_path
+            bpy.ops.render.opengl(write_still=True, view_context=True)
+            
+            # B. Grid Simulation Capture
+            if props.grid_simulation:
+                print("[GEMINI] Capturing grid simulation (WIREFRAME toggle)...")
+                space_data.shading.type = 'WIREFRAME'
+                scene.render.filepath = sim_path
+                bpy.ops.render.opengl(write_still=True, view_context=True)
+                space_data.shading.type = original_shading_type
+
+            # C. Capture Depth (Native Resolution)
+            print("[GEMINI] Capturing viewport depth...")
+            depth_renderer = depth_utils.DepthRenderer()
+            has_camera = scene.camera is not None
+            
+            if has_camera:
+                raw_depth_path = depth_renderer.render_depth_map_mist(scene, props.mist_start, props.mist_depth, props.mist_falloff)
+            else:
+                raw_depth_path = depth_renderer.render_depth_viewport(context, width=v_width, height=v_height)
+            
+            shutil.copy2(raw_depth_path, depth_path)
+
+            # E. Local Debug Localization (Relative to .blend)
+            blend_path = bpy.data.filepath
+            base_debug_dir = os.path.join(os.path.dirname(blend_path), "textures") if blend_path else os.path.join(temp_dir, "textures")
+            if not os.path.exists(base_debug_dir): os.makedirs(base_debug_dir)
+            
+            input_color_path = os.path.join(base_debug_dir, "input_viewport_color.png")
+            input_depth_path = os.path.join(base_debug_dir, "input_viewport_depth.png")
+            shutil.copy2(init_img_path, input_color_path)
+            shutil.copy2(depth_path, input_depth_path)
+            
+            if props.grid_simulation:
+                sim_output_path = os.path.join(base_debug_dir, "simulated_output_grid.png")
+                shutil.copy2(sim_path, sim_output_path)
+                print(f"🐞 [GEMINI] Simulated grid output saved to: {sim_output_path}")
+
+        except Exception as capture_error:
+            print(f"💥 [GEMINI] Capture Error: {capture_error}")
+            raise capture_error
+
+        finally:
+            # Restore Viewport Settings
+            scene.render.filepath = render_filepath
+            scene.render.image_settings.file_format = render_format
+            space_data.overlay.show_overlays = original_show_overlays
+            space_data.shading.type = original_shading_type
+
+        # 3. Setup Projection Logic (Remapping UVs)
+        target_objects_data = []
+        
+        # Use a consistent material name but create fresh if needed
+        mat_name = "Gemini_Projection_Material"
+        material = bpy.data.materials.get(mat_name)
+        if not material:
+            material = bpy.data.materials.new(name=mat_name)
+            material.use_nodes = True
+        
+        # Ensure nodes exist
+        nodes = material.node_tree.nodes
+        image_node = nodes.get("Gemini_Image_Node") or nodes.new("ShaderNodeTexImage")
+        image_node.name = "Gemini_Image_Node"
+        
+        principled = next((n for n in nodes if n.type == 'BSDF_PRINCIPLED'), None)
+        if principled:
+            material.node_tree.links.new(image_node.outputs['Color'], principled.inputs['Base Color'])
+        
+        uv_map_node = nodes.get("Gemini_UV_Map") or nodes.new("ShaderNodeUVMap")
+        uv_map_node.name = "Gemini_UV_Map"
+        uv_map_node.uv_map = "Projected UVs"
+        material.node_tree.links.new(uv_map_node.outputs['UV'], image_node.inputs['Vector'])
+        
+        import bmesh
+        from bpy_extras import view3d_utils, object_utils
+
+        if props.grid_simulation:
+            init_img_path = sim_path
+
+        # Process ALL selected mesh objects
+        processed_count = 0
+        for obj in context.selected_objects:
+            if obj.type != 'MESH': continue
+            
+            # Robust Material Slot Assignment
+            found_slot = -1
+            for i, slot in enumerate(obj.material_slots):
+                if slot.material == material:
+                    found_slot = i
+                    break
+            
+            if found_slot == -1:
+                # Add new slot
+                obj.data.materials.append(material)
+                found_slot = len(obj.data.materials) - 1
+            
+            # Check if object is in Edit Mode
+            bm = None
+            if obj.mode == 'EDIT':
+                bm = bmesh.from_edit_mesh(obj.data)
+            
+            if not bm:
+                print(f"⚠️ [GEMINI] Skipping {obj.name} - not in Edit Mode")
+                continue
+                
+            # Setup UV Layer
+            uv_layer_name = "Projected UVs"
+            uv_layer = bm.loops.layers.uv.get(uv_layer_name) or bm.loops.layers.uv.new(uv_layer_name)
+            
+            # Apply to selected faces
+            face_updated = False
+            for face in bm.faces:
+                if face.select:
+                    face.material_index = found_slot
+                    face_updated = True
+                    for loop in face.loops:
+                        world_co = obj.matrix_world @ loop.vert.co
+                        if has_camera:
+                            screen_co = object_utils.world_to_camera_view(scene, scene.camera, world_co)
+                            uv = (screen_co[0], screen_co[1])
+                        else:
+                            screen_co = view3d_utils.location_3d_to_region_2d(region, space_data.region_3d, world_co)
+                            if screen_co:
+                                uv = (screen_co[0] / v_width, screen_co[1] / v_height)
+                            else:
+                                uv = (0, 0)
+                        loop[uv_layer].uv = uv
+            
+            if face_updated:
+                bmesh.update_edit_mesh(obj.data)
+                processed_count += 1
+                
+                if props.projection_bake:
+                    bm_copy = bm.copy()
+                    bmesh.ops.delete(bm_copy, geom=[f for f in bm_copy.faces if not f.select], context='FACES')
+                    target_objects_data.append({
+                        'object_name': obj.name,
+                        'bm_copy': bm_copy,
+                        'src_uv_name': uv_layer_name,
+                        'dest_uv_name': obj.data.uv_layers.active.name
+                    })
+
+        if processed_count == 0:
+            self.report({'WARNING'}, "No faces were projected. Ensure meshes are in Edit Mode with faces selected.")
+            return {'CANCELLED'}
+
+        # 4. Start AI Thread
+        api_key = props.api_key.strip() or gemini_api.get_api_key()
+        api_client = gemini_api.GeminiAPI(api_key, model_name=props.model_name)
+        
+        print(f"🧵 [GEMINI] Starting Projection Thread for {processed_count} objects...")
+        self.current_thread = threading_utils.ProjectionRenderThread(
+            context=context,
+            api_client=api_client,
+            user_prompt=props.prompt,
+            depth_path=depth_path,
+            init_image_path=init_img_path,
+            target_objects_data=target_objects_data,
+            image_node_name=image_node.name,
+            material_name=material.name,
+            do_bake=props.projection_bake
+        )
+        self.current_thread.start()
+        
+        self.report({'INFO'}, f"AI Projection started for {processed_count} objects...")
+        return {'FINISHED'}
+
 
 class GEMINI_OT_stop_render(Operator):
     """Stop current AI render operation"""

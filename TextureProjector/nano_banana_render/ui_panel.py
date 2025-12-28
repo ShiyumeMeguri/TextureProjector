@@ -61,6 +61,16 @@ class GeminiRenderProperties(PropertyGroup):
         update=lambda self, context: sync_api_key(self, context)
     )
     
+    model_name: EnumProperty(
+        name="API Model",
+        description="Choose Gemini model",
+        items=[
+            ('gemini-2.5-flash-image', "Gemini 2.5 Flash (User Selected)", "User's preferred model ID"),
+            ('gemini-3-pro-image-preview', "Gemini 3 Pro (Experimental)", "Best for images, very high rate limiting"),
+        ],
+        default='gemini-2.5-flash-image'
+    )
+    
     prompt: StringProperty(
         name="Prompt", 
         description="Describe how you want the depth map to be transformed",
@@ -182,14 +192,26 @@ class GeminiRenderProperties(PropertyGroup):
         description="Whether AI render is in progress",
         default=False,
     )
+    
+    # Projection settings
+    projection_bake: BoolProperty(
+        name="Bake to UVs",
+        description="Bake the projected texture back to the object's original UV layout",
+        default=True,
+    )
+    grid_simulation: BoolProperty(
+        name="Simulation Mode (Grid)",
+        description="Capture wireframe grid instead of color for alignment verification",
+        default=False,
+    )
 
 class BANANA_PT_render_panel(Panel):
     """Main Nano Banana Render Panel"""
-    bl_label = "Nano Banana Pro"
+    bl_label = "Nano Banana Render"
     bl_idname = "BANANA_PT_render_panel"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "Nano Banana Pro"
+    bl_category = "Nano Banana"
     
     def draw(self, context):
         layout = self.layout
@@ -216,6 +238,10 @@ class BANANA_PT_render_panel(Panel):
         
         if props.show_auth:
             box.prop(props, "api_key", text="")
+            
+            # Model selection (VERY VISIBLE NOW)
+            box.label(text="Model Selection:", icon='NODE_SEL')
+            box.prop(props, "model_name", text="")
             
             if not props.api_key.strip():
                 box.label(text="Enter API key", icon='ERROR')
@@ -278,6 +304,8 @@ class BANANA_PT_render_panel(Panel):
         if props.show_settings:
             box = layout.box()
             
+            # Model selection removed from here
+            
             # Render Mode selection
             box.label(text="Render Mode:", icon='RENDERLAYERS')
             box.prop(props, "render_mode", text="")
@@ -327,6 +355,36 @@ class BANANA_PT_render_panel(Panel):
                 render_text = "Generate AI Render with Style"
             col.operator("gemini.ai_render", text=render_text, icon='RENDER_STILL')
         
+        # Texture Projection Section
+        layout.separator()
+        box = layout.box()
+        box.label(text="Texture Projection", icon='MOD_UVPROJECT')
+        
+        proj_col = box.column(align=True)
+        proj_col.scale_y = 1.5
+        
+        if props.is_rendering:
+            proj_col.enabled = False
+            proj_col.operator("gemini.texture_projection", text="Processing Projection...", icon='RENDER_ANIMATION')
+        else:
+            proj_col.operator("gemini.texture_projection", text="AI Texture Projection", icon='MOD_UVPROJECT')
+        
+        row = box.row()
+        row.prop(props, "projection_bake", text="Bake Result to Original UVs")
+        row = box.row()
+        row.prop(props, "grid_simulation", text="Simulation Mode (Grid)")
+        if props.projection_bake:
+            box.label(text="AI will bake the projection back to the object's texture", icon='INFO')
+        
+        # Validation feedback
+        obj = context.active_object
+        if not obj or obj.type != 'MESH':
+            box.label(text="Select a mesh object", icon='ERROR')
+        elif obj.mode != 'EDIT':
+            box.label(text="Enter Edit Mode to project", icon='EDITMODE_HLT')
+        else:
+             box.label(text="Select faces to project onto", icon='FACESEL')
+        
         # Status and utilities
         layout.separator()
         
@@ -359,7 +417,7 @@ class BANANA_PT_history_panel(Panel):
     bl_idname = "BANANA_PT_history_panel"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "Nano Banana Pro"
+    bl_category = "Nano Banana"
     bl_parent_id = "BANANA_PT_render_panel"
     
     def draw(self, context):

@@ -1,8 +1,14 @@
 import bpy
 import threading
+import os
 from queue import Queue
 from typing import Callable, Any
 import time
+import bmesh
+import gpu
+import mathutils
+import numpy as np
+from . import projection_utils
 
 class BlenderThreadManager:
     """Manager for thread-safe operations with Blender"""
@@ -53,6 +59,25 @@ _thread_manager = BlenderThreadManager()
 def execute_in_main_thread(func: Callable, *args, **kwargs) -> None:
     """Convenience function to execute in main thread"""
     _thread_manager.execute_in_main_thread(func, *args, **kwargs)
+
+def get_view3d_context():
+    """Find a 3D view area and return a context-like dictionary for it"""
+    import bpy
+    for window in bpy.context.window_manager.windows:
+        for area in window.screen.areas:
+            if area.type == 'VIEW_3D':
+                for region in area.regions:
+                    if region.type == 'WINDOW':
+                        return {
+                            'window': window,
+                            'screen': window.screen,
+                            'area': area,
+                            'region': region,
+                            'space_data': area.spaces.active,
+                            'scene': bpy.context.scene,
+                            'view_layer': bpy.context.view_layer,
+                        }
+    return None
 
 def update_render_status(scene, status_text: str, is_rendering: bool = None) -> None:
     """Update render status in UI (thread-safe)"""
@@ -627,11 +652,73 @@ class FullRenderThread(threading.Thread):
             props = self.scene.gemini_render if hasattr(self.scene, 'gemini_render') else None
             render_mode = props.render_mode if props and hasattr(props, 'render_mode') else 'DEPTH'
             
+            # Check for camera to determine if we need viewport fallback
+            has_camera = self.scene.camera is not None
+            
             # Execute render based on mode
             render_result = None
             depth_path = None
             
-            if render_mode == 'DEPTH':
+            if not has_camera:
+                print("[GEMINI] No camera found, using VIEWPORT FALLBACK...")
+                
+                def _do_viewport_fallback():
+                    nonlocal render_result, depth_path
+                    try:
+                        ctx = get_view3d_context()
+                        if not ctx:
+                            raise Exception("No 3D viewport found for camera-less capture")
+                        
+                        # Use a temporary context override
+                        with bpy.context.temp_override(**ctx):
+                            if render_mode == 'DEPTH':
+                                # Use our new viewport depth method
+                                print("[GEMINI] Rendering viewport depth (fallback)...")
+                                depth_path = self.depth_renderer.render_depth_viewport(bpy.context)
+                            else:
+                                # Use OpenGL render for color (fallback)
+                                print("[GEMINI] Rendering viewport color (fallback)...")
+                                import tempfile
+                                temp_path = tempfile.NamedTemporaryFile(suffix='.png', delete=False).name
+                                
+                                # Store and set render settings
+                                orig_path = self.scene.render.filepath
+                                orig_format = self.scene.render.image_settings.file_format
+                                self.scene.render.filepath = temp_path
+                                self.scene.render.image_settings.file_format = 'PNG'
+                                
+                                # Execute viewport render
+                                bpy.ops.render.opengl(write_still=True, view_context=True)
+                                
+                                # DEBUG SAVING
+                                try:
+                                    import os
+                                    import shutil
+                                    import time
+                                    debug_dir = r"E:\Debug"
+                                    if os.path.exists(debug_dir):
+                                        debug_path = os.path.join(debug_dir, f"color_{int(time.time())}.png")
+                                        shutil.copy2(temp_path, debug_path)
+                                        print(f"🐞 [GEMINI] Debug color saved to: {debug_path}")
+                                except Exception as de:
+                                    print(f"⚠️ [GEMINI] Debug color save failed: {de}")
+                                
+                                # Restore
+                                self.scene.render.filepath = orig_path
+                                self.scene.render.image_settings.file_format = orig_format
+                                
+                                depth_path = temp_path
+                                
+                            render_result = "success"
+                            print(f"[GEMINI] Viewport fallback completed: {depth_path}")
+                            
+                    except Exception as e:
+                        render_result = f"error: {str(e)}"
+                        print(f"[GEMINI] Viewport fallback error: {str(e)}")
+                
+                execute_in_main_thread(_do_viewport_fallback)
+                
+            elif render_mode == 'DEPTH':
                 # Depth Map (Mist) Mode
                 print("[GEMINI] Using DEPTH MAP (Mist) mode...")
                 
@@ -850,6 +937,185 @@ class FullRenderThread(threading.Thread):
             scene.use_nodes = original_use_nodes
             scene.render.image_settings.file_format = original_file_format
             scene.render.image_settings.color_mode = original_color_mode
+
+class ProjectionRenderThread(threading.Thread):
+    """Background thread for AI Texture Projection pipeline"""
+    
+    def __init__(self, context, api_client, user_prompt, depth_path, init_image_path, target_objects_data, image_node_name, material_name, do_bake):
+        super().__init__(daemon=True)
+        self.scene = context.scene
+        self.api_client = api_client
+        self.user_prompt = user_prompt
+        self.depth_path = depth_path
+        self.init_image_path = init_image_path
+        self.target_objects_data = target_objects_data
+        self.image_node_name = image_node_name
+        self.material_name = material_name
+        self.do_bake = do_bake
+        self._stop_event = threading.Event()
+        print("[GEMINI] ProjectionRenderThread initialized")
+    
+    def stop(self):
+        self._stop_event.set()
+    
+    def run(self):
+        print("[GEMINI] ProjectionRenderThread starting...")
+        try:
+            update_render_status(self.scene, "Sending projection to Gemini...", True)
+            
+            # 1. Call API with depth + init_image (color capture)
+            # The Gemini API needs to be told this is a projection task
+            # We'll use the depth as control and init_image as the base
+            
+            # Since GeminiAPI.generate_image takes depth_path and reference_path,
+            # we'll use init_image as reference_path but maybe with a custom prompt.
+            
+            # Wait, does generate_image support init_image?
+            # nano-banana-render's gemini_api.py:
+            # def generate_image(self, depth_image_path: str, user_prompt: str, reference_image_path: str = None, ...)
+            
+            # I should probably check gemini_api.py if it supports img2img or just depth-to-img.
+            # Viewing gemini_api.py again to be sure.
+            
+            from . import operators # Local import to avoid circularity
+            
+            # For now, let's assume we use the regular generate_image
+            # In Dream Textures, they used a "projection" prompt prefix.
+            projection_prompt = f"Project this into a texture: {self.user_prompt}"
+            
+            # Resolution - use viewport size or 1024
+            props = self.scene.gemini_render
+            resolution = int(props.resolution)
+            
+            print(f"🚀 [GEMINI] Calling AI to generate texture...")
+            image_data, mime_type = self.api_client.generate_image(
+                depth_image_path=self.depth_path,
+                user_prompt=projection_prompt,
+                reference_image_path=self.init_image_path,
+                is_color_render=True,
+                width=resolution,
+                height=resolution
+            )
+            
+            if self._stop_event.is_set():
+                return
+                
+            update_render_status(self.scene, "Processing result...", True)
+            
+            # 2. Main thread callback to apply and bake
+            def _apply_result():
+                try:
+                    import bpy
+                    import os
+                    import tempfile
+                    
+                    # Save result to temp
+                    with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as f:
+                        f.write(image_data)
+                        temp_res_path = f.name
+                    
+                    import numpy as np
+                    
+                    # 1. Load image and convert to flat NumPy array (Dream Textures equivalent)
+                    res_img = bpy.data.images.load(temp_res_path)
+                    res_img.name = "Gemini_Projection_Result"
+                    res_img.pack()
+                    os.unlink(temp_res_path)
+
+                    # Get pixels as NumPy array (Fast)
+                    width, height = res_img.size
+                    src_pixels = np.empty(width * height * 4, dtype=np.float32)
+                    res_img.pixels.foreach_get(src_pixels)
+                    
+                    # Update material
+                    material = bpy.data.materials.get(self.material_name)
+                    if material:
+                        node = material.node_tree.nodes.get(self.image_node_name)
+                        if node:
+                            node.image = res_img
+                    
+                    # 2. Baking logic (Dream Textures equivalent)
+                    if self.do_bake:
+                        update_render_status(self.scene, "Baking projection to UVs...", True)
+                        
+                        for data in self.target_objects_data:
+                            obj = bpy.data.objects.get(data['object_name'])
+                            if not obj: continue
+                            
+                            # Create baked image
+                            baked_name = f"{obj.name}_Baked_AI"
+                            if baked_name in bpy.data.images:
+                                bpy.data.images.remove(bpy.data.images[baked_name])
+                            baked_img = bpy.data.images.new(baked_name, width, height)
+                            
+                            # Mesh preparation (split edges as per dream-textures)
+                            bm = bmesh.new()
+                            bm.from_mesh(obj.data)
+                            bm.select_mode = {'FACE'}
+                            
+                            # Crucial: split edges so each face has unique verts for UVs
+                            bmesh.ops.split_edges(bm, edges=bm.edges)
+                            
+                            # Filter faces (only selected)
+                            # In dream-textures, they delete non-selected faces from the copy
+                            # But they also pass indices to the shader.
+                            # We'll follow the exact UV gathering:
+                            src_uv_layer = bm.loops.layers.uv.get(data['src_uv_name'])
+                            dest_uv_layer = bm.loops.layers.uv.get(data['dest_uv_name'])
+                            
+                            # NumPy UV gathering (Instant)
+                            num_verts = len(bm.verts)
+                            src_uvs_np = np.zeros((num_verts, 2), dtype=np.float32)
+                            dest_uvs_np = np.zeros((num_verts, 2), dtype=np.float32)
+                            
+                            for face in bm.faces:
+                                # Note: In our setup, we only project onto selected faces
+                                # but the baking happens on the whole mesh copy.
+                                for loop in face.loops:
+                                    src_uvs_np[loop.vert.index] = loop[src_uv_layer].uv
+                                    dest_uvs_np[loop.vert.index] = loop[dest_uv_layer].uv
+                            
+                            # Call ported bake function
+                            projection_utils.bake(
+                                context=bpy.context,
+                                mesh=bm,
+                                src=src_pixels,
+                                dest=baked_img,
+                                src_uv=src_uvs_np,
+                                dest_uv=dest_uvs_np
+                            )
+                            
+                            # Finalize
+                            node.image = baked_img
+                            uv_node = next((n for n in material.node_tree.nodes if n.type == 'UV_MAP'), None)
+                            if uv_node:
+                                uv_node.uv_map = data['dest_uv_name']
+                            
+                            baked_img.pack()
+                            bm.free()
+                            print(f"[GEMINI] Baked result to {baked_name}")
+                    
+                    update_render_status(self.scene, "Projection completed!", False)
+                    
+                    update_render_status(self.scene, "Projection completed!", False)
+                    
+                except Exception as e:
+                    print(f"[GEMINI] Error applying projection result: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    update_render_status(self.scene, f"Error: {str(e)}", False)
+                finally:
+                    # Cleanup
+                    if os.path.exists(self.depth_path): os.unlink(self.depth_path)
+                    if os.path.exists(self.init_image_path): os.unlink(self.init_image_path)
+                    for data in self.target_objects_data:
+                        data['bm_copy'].free()
+
+            execute_in_main_thread(_apply_result)
+            
+        except Exception as e:
+            print(f"[GEMINI] Projection thread error: {e}")
+            update_render_status(self.scene, f"Error: {str(e)}", False)
 
 def stop_thread_manager():
     """Stop the thread manager (call on addon unregister)"""

@@ -36,16 +36,25 @@ class GeminiAPIError(Exception):
 class GeminiAPI:
     """Client for Google Gemini API with official SDK"""
     
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, model_name: str = None):
         self.api_key = api_key
+        # Default model if not provided
+        self.model = model_name if model_name else "gemini-2.5-flash-image"
         
+        # Ensure model has 'models/' prefix for REST if missing
+        if self.model.startswith("models/"):
+             self.rest_model = self.model
+             self.base_model = self.model.replace("models/", "")
+        else:
+             self.rest_model = f"models/{self.model}"
+             self.base_model = self.model
+
         if GENAI_AVAILABLE and PIL_AVAILABLE:
-            print("🚀 [GEMINI] Using official Google GenAI SDK")
+            print(f"🚀 [GEMINI] Using official Google GenAI SDK (Model: {self.model})")
             try:
                 # Configure the official client
                 genai.configure(api_key=api_key)
                 self.client = genai.Client()
-                self.model = "gemini-3-pro-image-preview"
                 self.use_sdk = True
             except Exception as e:
                 print(f"⚠️ [GEMINI] SDK setup failed: {e}, falling back to REST")
@@ -62,7 +71,7 @@ class GeminiAPI:
     def _setup_rest_fallback(self):
         """Setup REST API fallback"""
         self.base_url = "https://generativelanguage.googleapis.com/v1beta"
-        self.model = "models/gemini-3-pro-image-preview"
+        # model is already set in __init__
         
     def _build_prompt(self, user_prompt: str, has_reference: bool = False, is_color_render: bool = False) -> str:
         """Build complete prompt with correct image order and render mode"""
@@ -318,7 +327,7 @@ class GeminiAPI:
                 config = types.GenerateContentConfig(
                     temperature=0.8,
                     candidate_count=1,
-                    response_modalities=['IMAGE'],
+                    response_modalities=['TEXT', 'IMAGE'],
                 )
                 
                 # Manually set image_config if possible, or pass as dict if the SDK supports it
@@ -339,7 +348,7 @@ class GeminiAPI:
                     config = types.GenerateContentConfig(
                         temperature=0.8,
                         candidate_count=1,
-                        response_modalities=['IMAGE'],
+                        response_modalities=['TEXT', 'IMAGE'],
                         image_config=img_conf
                     )
                 else:
@@ -351,7 +360,7 @@ class GeminiAPI:
                     config = {
                         "temperature": 0.8,
                         "candidateCount": 1,
-                        "responseModalities": ["IMAGE"],
+                        "responseModalities": ["TEXT", "IMAGE"],
                         "imageConfig": {
                             "imageSize": resolution_str,
                             "aspectRatio": "1:1"
@@ -365,7 +374,7 @@ class GeminiAPI:
                 config = types.GenerateContentConfig(
                     temperature=0.8,
                     candidate_count=1,
-                    response_modalities=['IMAGE']
+                    response_modalities=['TEXT', 'IMAGE']
                 )
             
             response = self.client.models.generate_content(
@@ -458,7 +467,11 @@ class GeminiAPI:
             full_prompt += f"\n\nCRITICAL OUTPUT SETTING: Generate image EXACTLY at {width}x{height} pixels."
             
             # Prepare REST API request
-            url = f"{self.base_url}/{self.model}:generateContent?key={self.api_key}"
+            model_path = self.rest_model
+            if not model_path.startswith("models/"):
+                 model_path = f"models/{model_path}"
+                 
+            url = f"{self.base_url}/{model_path}:generateContent?key={self.api_key}"
             print(f"🌐 [GEMINI] REST URL: {url}")
             
             headers = {
@@ -496,19 +509,27 @@ class GeminiAPI:
                 
             print(f"📏 [GEMINI] REST Mapped {width}x{height} to API resolution: {resolution_str}")
             
-            payload = {
-                "contents": [{"parts": parts}],
-                "generationConfig": {
+            # Check if this model likely supports imageConfig (mainly Pro models)
+            is_pro = "pro" in self.model.lower() or "gemini-3" in self.model.lower()
+            
+            def _build_payload(res_str: str = None):
+                gen_cfg = {
                     "temperature": 0.8,
                     "maxOutputTokens": 32768,
                     "candidateCount": 1,
-                    "responseModalities": ["IMAGE"],
-                    "imageConfig": {
-                        "imageSize": resolution_str,
+                    "responseModalities": ["TEXT", "IMAGE"],
+                }
+                if res_str:
+                    gen_cfg["imageConfig"] = {
+                        "imageSize": res_str,
                         "aspectRatio": "1:1"
                     }
+                return {
+                    "contents": [{"parts": parts}],
+                    "generationConfig": gen_cfg
                 }
-            }
+
+            payload = _build_payload(resolution_str if is_pro else None)
             
             print(f"📦 [GEMINI] REST payload size: ~{len(str(payload))} chars")
             print(f"🖼️ [GEMINI] Depth image data size: {len(image_base64)} chars")
@@ -519,6 +540,12 @@ class GeminiAPI:
             print("🚀 [GEMINI] Sending REST request...")
             response = requests.post(url, headers=headers, json=payload, timeout=300)
             
+            # Fallback for "unrecognized imageConfig" errors
+            if response.status_code == 400 and ("imageSize" in response.text or "imageConfig" in response.text):
+                print("🔄 [GEMINI] Model might not support imageSize, retrying without it...")
+                payload = _build_payload(None)
+                response = requests.post(url, headers=headers, json=payload, timeout=300)
+
             print(f"📡 [GEMINI] Response status: {response.status_code}")
             
             if response.status_code == 403:
@@ -1363,25 +1390,14 @@ class GeminiAPI:
                 })
                 print("[GEMINI] Mask image added")
             
-            # Make REST request
-            url = f"{self.base_url}/{self.model}:generateContent?key={self.api_key}"
-            headers = {
-                'Content-Type': 'application/json',
-                'X-Goog-Api-Client': 'python-blender-addon',
-            }
-            
             # Determine resolution
             resolution_str = "1K"
-            
             if width > 0 and height > 0:
-                # User forced resolution
                 if width >= 4096 or height >= 4096:
                     resolution_str = "4K"
                 elif width >= 2048 or height >= 2048:
                     resolution_str = "2K"
-                print(f"📏 [GEMINI] REST Edit Resolution (Forced): {width}x{height} -> {resolution_str}")
             else:
-                # Auto-detect
                 try:
                     if PIL_AVAILABLE:
                         with Image.open(image_path) as img:
@@ -1390,26 +1406,41 @@ class GeminiAPI:
                                 resolution_str = "4K"
                             elif w >= 2048 or h >= 2048:
                                 resolution_str = "2K"
-                            print(f"📏 [GEMINI] REST Edit Resolution (Auto): {w}x{h} -> {resolution_str}")
-                except Exception as e:
-                    print(f"⚠️ [GEMINI] Could not detect image size for REST: {e}")
+                except:
+                    pass
+                    
+            is_pro = "pro" in self.model.lower() or "gemini-3" in self.model.lower()
             
-            payload = {
-                "contents": [{"parts": parts}],
-                "generationConfig": {
-                    "temperature": 0.7,  # Lower temperature for more faithful edits
+            def _build_edit_payload(res_str: str = None):
+                gen_cfg = {
+                    "temperature": 0.7,
                     "maxOutputTokens": 32768,
                     "candidateCount": 1,
-                    "responseModalities": ["IMAGE"],
-                    "imageConfig": {
-                        "imageSize": resolution_str,
+                    "responseModalities": ["TEXT", "IMAGE"],
+                }
+                if res_str:
+                    gen_cfg["imageConfig"] = {
+                        "imageSize": res_str,
                         "aspectRatio": "1:1"
                     }
+                return {
+                    "contents": [{"parts": parts}],
+                    "generationConfig": gen_cfg
                 }
-            }
             
-            print("[GEMINI] Sending REST edit request...")
+            payload = _build_edit_payload(resolution_str if is_pro else None)
+            
+            # Make REST request
+            url = f"{self.base_url}/{self.rest_model}:generateContent?key={self.api_key}"
+            print(f"🚀 [GEMINI] Sending REST edit request to: {self.rest_model}")
             response = requests.post(url, headers=headers, json=payload, timeout=300)
+            
+            # Fallback for "unrecognized imageConfig" errors
+            if response.status_code == 400 and ("imageSize" in response.text or "imageConfig" in response.text):
+                print("🔄 [GEMINI] Model might not support imageSize, retrying without it...")
+                payload = _build_edit_payload(None)
+                response = requests.post(url, headers=headers, json=payload, timeout=300)
+            
             
             if response.status_code != 200:
                 raise GeminiAPIError(f"Edit request failed: {response.status_code} - {response.text}")
