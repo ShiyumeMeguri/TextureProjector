@@ -840,21 +840,16 @@ class ProjectionRenderThread(threading.Thread):
                          print("❌ [GEMINI] Failed to load projection result image")
                          return
 
-                    # Get pixels as NumPy array (Fast)
-                    width, height = res_img.size
-                    src_pixels = np.empty(width * height * 4, dtype=np.float32)
-                    res_img.pixels.foreach_get(src_pixels)
-                    
-                    # Update material
+                    # Update base material for preview
                     material = bpy.data.materials.get(self.material_name)
                     if material:
                         node = material.node_tree.nodes.get(self.image_node_name)
                         if node:
                             node.image = res_img
-                    
-                    # 2. Baking logic (Dream Textures equivalent)
+
+                    # 2. Baking logic
                     if self.do_bake:
-                        update_render_status(self.scene, "Baking projection to UVs...", True)
+                        update_render_status(self.scene, "Baking projection (Blender Native)...", True)
                         
                         for data in self.target_objects_data:
                             obj = bpy.data.objects.get(data['object_name'])
@@ -864,68 +859,126 @@ class ProjectionRenderThread(threading.Thread):
                             baked_name = f"{obj.name}_Baked_AI"
                             if baked_name in bpy.data.images:
                                 bpy.data.images.remove(bpy.data.images[baked_name])
-                            baked_img = bpy.data.images.new(baked_name, width, height)
+                            baked_img = bpy.data.images.new(baked_name, res_img.size[0], res_img.size[1])
                             
-                            # Mesh preparation (split edges as per dream-textures)
-                            bm = bmesh.new()
-                            bm.from_mesh(obj.data)
-                            bm.select_mode = {'FACE'}
-                            
-                            # Crucial: split edges so each face has unique verts for UVs
-                            bmesh.ops.split_edges(bm, edges=bm.edges)
-                            
-                            # Filter faces (only selected)
-                            # In dream-textures, they delete non-selected faces from the copy
-                            # But they also pass indices to the shader.
-                            # We'll follow the exact UV gathering:
-                            src_uv_layer = bm.loops.layers.uv.get(data['src_uv_name'])
-                            dest_uv_layer = bm.loops.layers.uv.get(data['dest_uv_name'])
-                            
-                            # NumPy UV gathering (Instant)
-                            num_verts = len(bm.verts)
-                            src_uvs_np = np.zeros((num_verts, 2), dtype=np.float32)
-                            dest_uvs_np = np.zeros((num_verts, 2), dtype=np.float32)
-                            
-                            for face in bm.faces:
-                                # Note: In our setup, we only project onto selected faces
-                                # but the baking happens on the whole mesh copy.
-                                for loop in face.loops:
-                                    src_uvs_np[loop.vert.index] = loop[src_uv_layer].uv
-                                    dest_uvs_np[loop.vert.index] = loop[dest_uv_layer].uv
-                            
-                            # Call ported bake function
-                            projection_utils.bake(
-                                context=bpy.context,
-                                mesh=bm,
-                                src=src_pixels,
-                                dest=baked_img,
-                                src_uv=src_uvs_np,
-                                dest_uv=dest_uvs_np
-                            )
-                            
-                            # Finalize
-                            # Enforce unique material for each object to prevent overwriting
+                            # Ensure we have a valid material reference
+                            if not material:
+                                material = bpy.data.materials.get(self.material_name)
+                                
+                            # Prepare Material for this object
                             baked_mat_name = f"{material.name}_{obj.name}_Baked"
-                            obj_mat = bpy.data.materials.get(baked_mat_name) or material.copy()
-                            obj_mat.name = baked_mat_name
+                            obj_mat = bpy.data.materials.get(baked_mat_name)
+                            if not obj_mat:
+                                obj_mat = material.copy()
+                                obj_mat.name = baked_mat_name
                             
-                            # Update this object's slots
+                            # FORCE SHADELESS - Completely clear and rebuild if it's not our spec
+                            # (This handles existing materials that might have BSDF)
+                            if True: # Always enforce for now to satisfy "彻底清除干净"
+                                o_nodes = obj_mat.node_tree.nodes
+                                o_links = obj_mat.node_tree.links
+                                o_nodes.clear()
+                                # Rebuild shadeless
+                                o_out = o_nodes.new("ShaderNodeOutputMaterial")
+                                o_out.location = (400, 0)
+                                o_emit = o_nodes.new("ShaderNodeEmission")
+                                o_emit.location = (200, 0)
+                                o_emit.inputs['Strength'].default_value = 1.0
+                                o_tex = o_nodes.new("ShaderNodeTexImage")
+                                o_tex.name = self.image_node_name # Link back to the node name we expect
+                                o_tex.location = (0, 0)
+                                o_uv = o_nodes.new("ShaderNodeUVMap")
+                                o_uv.name = "Gemini_UV_Map"
+                                o_uv.location = (-200, 0)
+                                
+                                o_links.new(o_uv.outputs['UV'], o_tex.inputs['Vector'])
+                                o_links.new(o_tex.outputs['Color'], o_emit.inputs['Color'])
+                                o_links.new(o_emit.outputs['Emission'], o_out.inputs['Surface'])
+                            
+                            # Assign material to object
+                            # Prepare a unique material for this specific object
+                            # (This ensures we don't accidentally bake two objects into the same material/texture)
+                            unique_mats_map = {} # Original mat -> Object unique mat
+                            
                             for m_idx, slot in enumerate(obj.material_slots):
-                                if slot.material == material:
-                                    obj.data.materials[m_idx] = obj_mat
+                                if not slot.material: continue
+                                
+                                # If this material was our projection material or is shared, copy it
+                                mat = slot.material
+                                if mat not in unique_mats_map:
+                                    new_mat = mat.copy()
+                                    new_mat.name = f"{mat.name}_{obj.name}_Baked"
+                                    unique_mats_map[mat] = new_mat
+                                
+                                # Assign the unique copy to the object
+                                obj.data.materials[m_idx] = unique_mats_map[mat]
+                                
+                                # Ensure the projection node in this UNIQUE material has the AI result
+                                if unique_mats_map[mat].use_nodes:
+                                    proj_node = unique_mats_map[mat].node_tree.nodes.get(self.image_node_name)
+                                    if proj_node:
+                                        proj_node.image = res_img
+                                        print(f"[GEMINI] Prepared unique material {new_mat.name} with AI result")
+
+                            # 2. Configure UV Layer "Indices" for baking:
+                            # The ACTIVE UV layer is where Blender's bake operator outputs the result.
+                            # We want to bake INTO the target UV (dest_uv_name).
+                            if data['dest_uv_name'] in obj.data.uv_layers:
+                                obj.data.uv_layers.active = obj.data.uv_layers[data['dest_uv_name']]
+                                print(f"[GEMINI] {obj.name} set {data['dest_uv_name']} as active for baking")
                             
-                            # Update the image and UV on the NEW material
-                            obj_node = obj_mat.node_tree.nodes.get(self.image_node_name)
-                            if obj_node:
-                                obj_node.image = baked_img
+                            # Ensure active render is also set (often used as fallback)
+                            if data['dest_uv_name'] in obj.data.uv_layers:
+                                obj.data.uv_layers[data['dest_uv_name']].active_render = True
                             
-                            obj_uv_node = next((n for n in obj_mat.node_tree.nodes if n.type == 'UV_MAP'), None)
-                            if obj_uv_node:
-                                obj_uv_node.uv_map = data['dest_uv_name']
+                            # Perform Native Bake
+                            try:
+                                margin = getattr(self.scene.gemini_render, "bake_margin", 16)
+                                projection_utils.bake(
+                                    context=bpy.context,
+                                    obj=obj,
+                                    texture_node_name=self.image_node_name,
+                                    target_image=baked_img,
+                                    src_uv_name=data['src_uv_name'],
+                                    margin=margin
+                                )
+                            except Exception as e:
+                                print(f"❌ [GEMINI] Native bake failed for {obj.name}: {e}")
+                                continue
+                            
+                            # 3. POST-BAKE MATERIAL FINALIZATION
+                            # Update all unique materials of this object to use the baked image
+                            for slot in obj.material_slots:
+                                if slot.material and slot.material.use_nodes:
+                                    m_nodes = slot.material.node_tree.nodes
+                                    m_links = slot.material.node_tree.links
+                                    
+                                    t_node = m_nodes.get(self.image_node_name)
+                                    if not t_node:
+                                        continue # Fix for AttributeError
+                                        
+                                    t_node.image = baked_img
+                                    print(f"[GEMINI] Finalized {slot.material.name} with baked image")
+                                        
+                                    # Restore UV mapping to the destination (the UV map we baked to)
+                                    for link in t_node.inputs['Vector'].links:
+                                        if link.from_node.type == 'UV_MAP':
+                                            link.from_node.uv_map = data['dest_uv_name']
+                                            print(f"[GEMINI] Switched {slot.material.name} UV to {data['dest_uv_name']}")
+                                            break
+                                    else:
+                                        # Fallback link creation
+                                        uv_n = next((n for n in m_nodes if n.type == 'UV_MAP'), None) or m_nodes.new('ShaderNodeUVMap')
+                                        uv_n.uv_map = data['dest_uv_name']
+                                        if not t_node.inputs['Vector'].is_linked:
+                                            m_links.new(uv_n.outputs['UV'], t_node.inputs['Vector'])
+                            
+                            # Restore UI active UV
+                            if data['dest_uv_name'] in obj.data.uv_layers:
+                                obj.data.uv_layers.active = obj.data.uv_layers[data['dest_uv_name']]
                             
                             baked_img.pack()
-                            bm.free()
-                            print(f"[GEMINI] Baked result to {baked_name}")
+                            print(f"✅ [GEMINI] Bake successful for {obj.name} -> {baked_name}")
                     
                     update_render_status(self.scene, "Projection completed!", False)
                     
@@ -936,16 +989,18 @@ class ProjectionRenderThread(threading.Thread):
                     update_render_status(self.scene, f"Error: {str(e)}", False)
                 finally:
                     # Cleanup
-                    if os.path.exists(self.depth_path): os.unlink(self.depth_path)
-                    if os.path.exists(self.init_image_path): os.unlink(self.init_image_path)
+                    try:
+                        if os.path.exists(self.depth_path): os.unlink(self.depth_path)
+                        if os.path.exists(self.init_image_path): os.unlink(self.init_image_path)
+                    except: pass
                     for data in self.target_objects_data:
-                        data['bm_copy'].free()
+                        try: data['bm_copy'].free()
+                        except: pass
 
             execute_in_main_thread(_apply_result)
             
         except Exception as e:
             print(f"[GEMINI] Projection thread error: {e}")
-            update_render_status(self.scene, f"Error: {str(e)}", False)
 
 def stop_thread_manager():
     """Stop the thread manager (call on addon unregister)"""

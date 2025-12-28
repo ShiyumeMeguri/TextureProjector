@@ -153,6 +153,14 @@ class GEMINI_OT_texture_projection(Operator):
             self.report({'ERROR'}, str(e))
             return {'CANCELLED'}
 
+        # Capture the intended bake target UV Map (the one currently active in the UI)
+        # for each selected mesh object.
+        original_active_uvs = {}
+        for obj in context.selected_objects:
+            if obj.type == 'MESH' and obj.data.uv_layers.active:
+                original_active_uvs[obj.name] = obj.data.uv_layers.active.name
+                print(f"[GEMINI] Target UV for {obj.name}: {original_active_uvs[obj.name]}")
+
         # Find 3D Viewport
         viewport_area = next((a for a in context.screen.areas if a.type == 'VIEW_3D'), None)
         if not viewport_area:
@@ -258,19 +266,36 @@ class GEMINI_OT_texture_projection(Operator):
             material = bpy.data.materials.new(name=mat_name)
             material.use_nodes = True
         
-        # Ensure nodes exist
         nodes = material.node_tree.nodes
-        image_node = nodes.get("Gemini_Image_Node") or nodes.new("ShaderNodeTexImage")
+        links = material.node_tree.links
+        
+        # CLEAR ALL DEFAULT NODES (Especially the Principled BSDF)
+        nodes.clear()
+        
+        # 1. Create Output Node
+        output_node = nodes.new("ShaderNodeOutputMaterial")
+        output_node.location = (400, 0)
+        
+        # 2. Create Emission Node (For shadeless color)
+        emit_node = nodes.new("ShaderNodeEmission")
+        emit_node.location = (200, 0)
+        emit_node.inputs['Strength'].default_value = 1.0
+        
+        # 3. Create Image Texture Node
+        image_node = nodes.new("ShaderNodeTexImage")
         image_node.name = "Gemini_Image_Node"
+        image_node.location = (0, 0)
         
-        principled = next((n for n in nodes if n.type == 'BSDF_PRINCIPLED'), None)
-        if principled:
-            material.node_tree.links.new(image_node.outputs['Color'], principled.inputs['Base Color'])
-        
-        uv_map_node = nodes.get("Gemini_UV_Map") or nodes.new("ShaderNodeUVMap")
+        # 4. Create UV Map Node
+        uv_map_node = nodes.new("ShaderNodeUVMap")
         uv_map_node.name = "Gemini_UV_Map"
         uv_map_node.uv_map = "Projected UVs"
-        material.node_tree.links.new(uv_map_node.outputs['UV'], image_node.inputs['Vector'])
+        uv_map_node.location = (-200, 0)
+        
+        # Link them up: UV -> Image -> Emission -> Output
+        links.new(uv_map_node.outputs['UV'], image_node.inputs['Vector'])
+        links.new(image_node.outputs['Color'], emit_node.inputs['Color'])
+        links.new(emit_node.outputs['Emission'], output_node.inputs['Surface'])
         
         import bmesh
         from bpy_extras import view3d_utils, object_utils
@@ -338,7 +363,7 @@ class GEMINI_OT_texture_projection(Operator):
                         'object_name': obj.name,
                         'bm_copy': bm_copy,
                         'src_uv_name': uv_layer_name,
-                        'dest_uv_name': obj.data.uv_layers.active.name
+                        'dest_uv_name': original_active_uvs.get(obj.name, obj.data.uv_layers.active.name)
                     })
 
         if processed_count == 0:
