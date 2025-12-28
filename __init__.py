@@ -105,6 +105,7 @@ core_classes = (
 debug_classes = (
     operators.GEMINI_OT_reset_state,
     operators.GEMINI_OT_open_console,
+    operators.GEMINI_OT_debug_next,
 )
 
 # All classes combined

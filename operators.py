@@ -19,6 +19,20 @@ from . import depth_utils
 from . import threading_utils
 from . import projection_utils
 
+# === DEBUG STORAGE ===
+_debug_storage = {
+    'step': 0,
+    'temp_dir': None,
+    'init_img_path': None,
+    'depth_path': None,
+    'mask_repair_data': None,
+    'target_objects_data': [],
+    'material_name': "Gemini_Projection_Material",
+    'image_node_name': "Gemini_Image_Node",
+    'original_state': {} # Store original resolution etc
+}
+# =====================
+
 class GEMINI_OT_ai_render(Operator):
     """AI Render operator - main functionality"""
     bl_idname = "gemini.ai_render"
@@ -143,6 +157,7 @@ class GEMINI_OT_texture_projection(Operator):
             return False
 
     def execute(self, context):
+        import bmesh # Fix UnboundLocalError
         scene = context.scene
         props = scene.gemini_render
         
@@ -198,6 +213,122 @@ class GEMINI_OT_texture_projection(Operator):
         scene.render.resolution_y = v_height
         scene.render.resolution_percentage = 100
         
+        # Mask Repair Mode: Create temp mask mesh WITHOUT affecting original object state
+        mask_repair_data = None
+        if props.mask_repair_mode:
+            try:
+                print("[GEMINI] Mask Repair Mode: Creating mask overlay mesh...")
+                
+                # Get the active object (must be in Edit Mode)
+                obj = context.active_object
+                if not obj or obj.type != 'MESH' or obj.mode != 'EDIT':
+                    raise Exception("Active object must be a mesh in Edit Mode")
+                
+                obj_name = obj.name
+                print(f"[GEMINI] Mask Repair Mode: Active object = '{obj_name}'")
+                
+                # Get bmesh from edit mesh
+                bm = bmesh.from_edit_mesh(obj.data)
+                
+                # Count and identify selected faces
+                selected_faces = [f for f in bm.faces if f.select]
+                print(f"[GEMINI] Mask Repair Mode: {len(selected_faces)} faces selected")
+                
+                if not selected_faces:
+                    raise Exception("No faces selected")
+                
+                # FACE-AWARE TEXTURE TARGETING: Use material of first selected face
+                target_mat_index = selected_faces[0].material_index
+                original_texture = None
+                
+                if target_mat_index < len(obj.material_slots):
+                    slot = obj.material_slots[target_mat_index]
+                    if slot.material and slot.material.use_nodes:
+                        for node in slot.material.node_tree.nodes:
+                            if node.type == 'TEX_IMAGE' and node.image:
+                                original_texture = node.image
+                                break
+                
+                # Fallback to search ALL slots if not found in target slot (unlikely but safe)
+                if not original_texture:
+                    print("⚠️ [GEMINI] Targeted slot has no image, searching all slots...")
+                    for slot in obj.material_slots:
+                        if slot.material and slot.material.use_nodes:
+                            for node in slot.material.node_tree.nodes:
+                                if node.type == 'TEX_IMAGE' and node.image:
+                                    original_texture = node.image
+                                    break
+                        if original_texture: break
+                
+                if not selected_faces:
+                    raise Exception("No faces selected")
+                
+                # Create a COPY for temp mesh (does not affect original)
+                bm_copy = bm.copy()
+                
+                # Delete unselected faces from the copy
+                faces_to_delete = [f for f in bm_copy.faces if not f.select]
+                bmesh.ops.delete(bm_copy, geom=faces_to_delete, context='FACES')
+                
+                # Create new mesh data from the copy
+                temp_mesh = bpy.data.meshes.new(f"{obj_name}_MaskTemp_Data")
+                bm_copy.to_mesh(temp_mesh)
+                bm_copy.free()
+                
+                # Create temp object
+                temp_obj = bpy.data.objects.new(f"{obj_name}_MaskTemp", temp_mesh)
+                temp_obj.matrix_world = obj.matrix_world.copy()
+                
+                # Link to scene
+                context.collection.objects.link(temp_obj)
+                
+                # Create mask material
+                mask_mat_name = "Gemini_Mask_Material_Temp"
+                mask_mat = bpy.data.materials.get(mask_mat_name)
+                if mask_mat:
+                    bpy.data.materials.remove(mask_mat)
+                mask_mat = bpy.data.materials.new(name=mask_mat_name)
+                mask_mat.use_nodes = True
+                mask_nodes = mask_mat.node_tree.nodes
+                mask_links = mask_mat.node_tree.links
+                mask_nodes.clear()
+                
+                mask_output = mask_nodes.new("ShaderNodeOutputMaterial")
+                mask_output.location = (300, 0)
+                mask_emit = mask_nodes.new("ShaderNodeEmission")
+                mask_emit.location = (100, 0)
+                mask_emit.inputs['Color'].default_value = (props.mask_color[0], props.mask_color[1], props.mask_color[2], 1.0)
+                mask_emit.inputs['Strength'].default_value = 1.0
+                mask_links.new(mask_emit.outputs['Emission'], mask_output.inputs['Surface'])
+                
+                # Assign material to temp mesh
+                temp_obj.data.materials.clear()
+                temp_obj.data.materials.append(mask_mat)
+                
+                # Store mask repair data
+                mask_repair_data = {
+                    'temp_objects': [temp_obj.name],
+                    'temp_materials': [mask_mat_name],
+                    'original_textures': {obj_name: original_texture.name},
+                    'original_object_names': [obj_name],
+                }
+                
+                print(f"[GEMINI] Mask Repair Mode: Created temp mesh '{temp_obj.name}' with mask material")
+                print("[GEMINI] Mask Repair Mode: Original object state UNCHANGED")
+                
+            except Exception as mask_error:
+                print(f"❌ [GEMINI] Mask Repair Mode setup error: {mask_error}")
+                import traceback
+                traceback.print_exc()
+                # CRITICAL CHANGE: Abort immediately to prevent falling back to Standard Mode (which would destroy the texture)
+                self.report({'ERROR'}, f"Mask Repair Setup Failed: {mask_error}. Aborting to protect texture.")
+                return {'CANCELLED'}
+        
+        # PRE-FLIGHT CHECK
+        if props.mask_repair_mode and not mask_repair_data:
+             self.report({'ERROR'}, "Mask Repair Mode active but no mask data generated. Aborting.")
+             return {'CANCELLED'}
+
         try:
             # A. Capture Color (Native Resolution)
             print(f"[GEMINI] Capturing viewport color ({v_width}x{v_height})...")
@@ -308,6 +439,77 @@ class GEMINI_OT_texture_projection(Operator):
         for obj in context.selected_objects:
             if obj.type != 'MESH': continue
             
+            # ABSOLUTE ZERO-LEAK GUARD: If in Repair Mode, strictly skip ORIGINAL objects 
+            # in the standard projection setup path. Only the temp objects should receive 
+            # the projection material.
+            if props.mask_repair_mode and mask_repair_data:
+                if obj.name in mask_repair_data['original_object_names']:
+                    print(f"🛡️ [GEMINI] Repair Mode Isolation: Skipping original object '{obj.name}' setup")
+                    
+                    # Instead, we setup the corresponding temp object
+                    try:
+                        idx = mask_repair_data['original_object_names'].index(obj.name)
+                        temp_obj_name = mask_repair_data['temp_objects'][idx]
+                        temp_obj = bpy.data.objects.get(temp_obj_name)
+                        
+                        if temp_obj:
+                            print(f"[GEMINI] Redirecting projection to TEMP object: '{temp_obj.name}'")
+                            
+                            # 1. Apply Projection Material (it was already cleared/has mask mat, but let's be sure)
+                            temp_obj.data.materials.clear()
+                            temp_obj.data.materials.append(material)
+                            
+                            # 2. UV Projection on Temp Obj
+                            bpy.ops.object.mode_set(mode='OBJECT')
+                            bpy.ops.object.select_all(action='DESELECT')
+                            temp_obj.select_set(True)
+                            context.view_layer.objects.active = temp_obj
+                            bpy.ops.object.mode_set(mode='EDIT')
+                            
+                            bm_temp = bmesh.from_edit_mesh(temp_obj.data)
+                            uv_layer_name = "Projected UVs"
+                            uv_layer = bm_temp.loops.layers.uv.get(uv_layer_name) or bm_temp.loops.layers.uv.new(uv_layer_name)
+                            
+                            for face in bm_temp.faces:
+                                face.material_index = 0
+                                for loop in face.loops:
+                                    world_co = temp_obj.matrix_world @ loop.vert.co
+                                    if has_camera:
+                                        screen_co = object_utils.world_to_camera_view(scene, scene.camera, world_co)
+                                        uv = (screen_co[0], screen_co[1])
+                                    else:
+                                        screen_co = view3d_utils.location_3d_to_region_2d(region, space_data.region_3d, world_co)
+                                        uv = (screen_co[0]/v_width, screen_co[1]/v_height) if screen_co else (0,0)
+                                    loop[uv_layer].uv = uv
+                                    
+                            bmesh.update_edit_mesh(temp_obj.data)
+                            bm_copy = bm_temp.copy()
+                            
+                            # Add to data (Source=Temp, Target=Original for baking reference)
+                            dest_uv_name = original_active_uvs.get(obj.name, "")
+                            if not dest_uv_name and obj.data.uv_layers.active:
+                                dest_uv_name = obj.data.uv_layers.active.name
+
+                            target_objects_data.append({
+                                'object_name': temp_obj.name, 
+                                'original_object_name': obj.name,
+                                'bm_copy': bm_copy,
+                                'src_uv_name': uv_layer_name,
+                                'dest_uv_name': dest_uv_name
+                            })
+                            processed_count += 1
+                            bpy.ops.object.mode_set(mode='OBJECT')
+                    except Exception as e:
+                        print(f"❌ [GEMINI] Repair Mode Setup Error: {e}")
+                    
+                    continue # IMPORTANT: SKIP standard processing for the original object
+                
+            # === END MASK REPAIR MODE PATH ===
+
+            # CRITICAL: Skip temp mask objects - they should NEVER be processed for projection/baking in normal flow
+            if '_MaskTemp' in obj.name:
+                continue
+            
             # Robust Material Slot Assignment
             found_slot = -1
             for i, slot in enumerate(obj.material_slots):
@@ -320,13 +522,22 @@ class GEMINI_OT_texture_projection(Operator):
                 obj.data.materials.append(material)
                 found_slot = len(obj.data.materials) - 1
             
-            # Check if object is in Edit Mode
+            # Check if object is in Edit Mode - if not, switch to it
             bm = None
+            if obj.mode != 'EDIT':
+                # Need to switch this object to edit mode
+                bpy.ops.object.mode_set(mode='OBJECT')
+                bpy.ops.object.select_all(action='DESELECT')
+                obj.select_set(True)
+                context.view_layer.objects.active = obj
+                bpy.ops.object.mode_set(mode='EDIT')
+                print(f"[GEMINI] Switched {obj.name} to Edit Mode")
+            
             if obj.mode == 'EDIT':
                 bm = bmesh.from_edit_mesh(obj.data)
             
             if not bm:
-                print(f"⚠️ [GEMINI] Skipping {obj.name} - not in Edit Mode")
+                print(f"⚠️ [GEMINI] Skipping {obj.name} - could not access Edit Mode mesh")
                 continue
                 
             # Setup UV Layer
@@ -385,7 +596,8 @@ class GEMINI_OT_texture_projection(Operator):
             image_node_name=image_node.name,
             material_name=material.name,
             do_bake=props.projection_bake,
-            bypass_api=props.grid_simulation
+            bypass_api=props.grid_simulation,
+            mask_repair_data=mask_repair_data
         )
         self.current_thread.start()
         
@@ -1189,3 +1401,389 @@ class GEMINI_OT_load_example_reference(Operator):
             context.window_manager.popup_menu(draw_message, title="Style Reference Examples", icon='IMAGE_DATA')
             self.report({'INFO'}, "Check popup for reference image ideas")
             return {'FINISHED'}
+
+class GEMINI_OT_debug_next(Operator):
+    """Manual Step-by-Step Debugging for Texture Projection"""
+    bl_idname = "gemini.debug_next"
+    bl_label = "Next Debug Step"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        import bmesh
+        import tempfile
+        import os
+        
+        props = context.scene.gemini_render
+        
+        print(f"\n🚀 [GEMINI DEBUG] Starting Robust Debug Sequence...")
+        
+        # 1. Immediate Context Validation
+        if not context.selected_objects:
+             # Try to find active object
+             if context.active_object:
+                 context.active_object.select_set(True)
+             else:
+                 self.report({'ERROR'}, "No objects selected! Please select a mesh.")
+                 return {'CANCELLED'}
+
+        # 2. Store Active Object Name (Persistence)
+        active = context.active_object
+        if active:
+             _debug_storage['debug_active_object'] = active.name
+             
+        props = context.scene.gemini_render
+        
+        # 1. Validation (Synchronous)
+        try:
+            # We want to use view_layer.objects.active consistently
+            if not context.view_layer.objects.active:
+                self.report({'ERROR'}, "No active object selected")
+                return {'CANCELLED'}
+            
+            # Start logic
+            if props.debug_step == 0:
+                print("🚀 [GEMINI DEBUG] Starting Robust Manual Debug Sequence...")
+                # Global cleanup
+                _debug_storage.clear()
+                _debug_storage['debug_active_object'] = context.active_object.name
+                
+            # Run EXACTLY ONE STEP
+            self.execute_debug_step(context)
+            
+        except Exception as e:
+            self.report({'ERROR'}, f"Debug Execution Error: {e}")
+            return {'CANCELLED'}
+
+        return {'FINISHED'}
+
+    def execute_debug_step(self, context):
+        """Executes a single step of the debug process."""
+        import bmesh
+        import os
+        import tempfile
+        import shutil
+        from . import projection_utils
+        from bpy_extras import view3d_utils, object_utils
+        
+        props = context.scene.gemini_render
+        scene = context.scene
+        step = props.debug_step
+        
+        if not props.debug_mode:
+            print("🛑 [DEBUG] Sequence Stopped (Debug Mode Disabled)")
+            return
+            
+        print(f"\n================ [GEMINI DEBUG] Executing Step {step} ================")
+        
+        try:
+            # Re-acquire Active Object safely
+            target_name = _debug_storage.get('debug_active_object')
+            if target_name:
+                obj = bpy.data.objects.get(target_name)
+                if obj:
+                    context.view_layer.objects.active = obj
+                    if not obj.select_get():
+                        obj.select_set(True)
+            
+            # STEP 0: Capture & Init
+            if step == 0:
+                print("1 [DEBUG] Starting Capture Phase...")
+                
+                # Setup Clean Storage
+                if 'target_objects_data' in _debug_storage: del _debug_storage['target_objects_data']
+                if 'mask_repair_data' in _debug_storage: del _debug_storage['mask_repair_data']
+                _debug_storage['target_objects_data'] = []
+                _debug_storage['mask_repair_data'] = None
+                
+                # Temp Dir
+                temp_dir = tempfile.mkdtemp(prefix="gemini_debug_")
+                _debug_storage['temp_dir'] = temp_dir
+                init_img_path = os.path.join(temp_dir, "init.png")
+                _debug_storage['init_img_path'] = init_img_path
+                
+                # Capture Viewport
+                viewport_area = next((a for a in context.screen.areas if a.type == 'VIEW_3D'), None)
+                if not viewport_area:
+                    print("❌ No Viewport")
+                    return
+                    
+                print(f"1.1 [DEBUG] Capturing to {init_img_path}")
+                
+                # Capture Settings
+                orig_res_x = scene.render.resolution_x
+                orig_res_y = scene.render.resolution_y
+                orig_res_pct = scene.render.resolution_percentage
+                
+                region = viewport_area.regions[-1]
+                scene.render.resolution_x = region.width
+                scene.render.resolution_y = region.height
+                scene.render.resolution_percentage = 100
+                scene.render.filepath = init_img_path
+                scene.render.image_settings.file_format = 'PNG'
+                
+                bpy.ops.render.opengl(write_still=True, view_context=True)
+                
+                # Restore
+                scene.render.resolution_x = orig_res_x
+                scene.render.resolution_y = orig_res_y
+                scene.render.resolution_percentage = orig_res_pct
+                
+                print("1.2 [DEBUG] Capture Complete")
+                props.debug_step += 1
+                
+            # STEP 1: Temp Object Creation (Repair Mode)
+            elif step == 1:
+                print("2 [DEBUG] Creating Temp Objects (Mask Repair)...")
+                
+                if props.mask_repair_mode:
+                    obj = context.active_object
+                    if not obj or obj.type != 'MESH': 
+                         print("❌ Invalid Object")
+                         return
+                    
+                    obj_name = obj.name
+                    print(f"2.1 [DEBUG] Processing Object: {obj_name}")
+
+                    # 1. SETUP BMESH FOR FACE SELECTION
+                    if obj.mode != 'EDIT':
+                         bpy.ops.object.mode_set(mode='EDIT')
+                    
+                    bm = bmesh.from_edit_mesh(obj.data)
+                    selected_faces = [f for f in bm.faces if f.select]
+                    
+                    if not selected_faces:
+                         print("❌ No faces selected in Edit Mode")
+                         return
+                    
+                    # 2. FACE-AWARE TEXTURE TARGETING
+                    target_mat_index = selected_faces[0].material_index
+                    original_texture = None
+                    if target_mat_index < len(obj.material_slots):
+                        slot = obj.material_slots[target_mat_index]
+                        if slot.material and slot.material.use_nodes:
+                            for node in slot.material.node_tree.nodes:
+                                if node.type == 'TEX_IMAGE' and node.image:
+                                    original_texture = node.image
+                                    break
+                    
+                    tex_name = original_texture.name if original_texture else "None"
+                    print(f"2.2 [DEBUG] Target Texture (Material Slot {target_mat_index}): {tex_name}")
+                    
+                    if not original_texture:
+                        print("⚠️ [DEBUG] No texture found in targeted slot!")
+
+                    # 3. CREATE TEMP OBJECT (NON-DESTRUCTIVE BMesh copy)
+                    bm_copy = bm.copy()
+                    faces_to_delete = [f for f in bm_copy.faces if not f.select]
+                    bmesh.ops.delete(bm_copy, geom=faces_to_delete, context='FACES')
+                    
+                    # New Mesh & Object
+                    temp_mesh = bpy.data.meshes.new(f"{obj_name}_DebugMask_Data")
+                    bm_copy.to_mesh(temp_mesh)
+                    bm_copy.free()
+                    
+                    temp_obj = bpy.data.objects.new(f"{obj_name}_MaskTemp", temp_mesh)
+                    temp_obj.matrix_world = obj.matrix_world.copy()
+                    context.collection.objects.link(temp_obj)
+                    
+                    # 4. Apply Mask Material (Magenta)
+                    mask_mat = bpy.data.materials.new(name="Gemini_Debug_Mask")
+                    mask_mat.use_nodes = True
+                    mask_mat.node_tree.nodes.clear()
+                    m_out = mask_mat.node_tree.nodes.new("ShaderNodeOutputMaterial")
+                    m_emit = mask_mat.node_tree.nodes.new("ShaderNodeEmission")
+                    m_emit.inputs['Color'].default_value = (props.mask_color[0], props.mask_color[1], props.mask_color[2], 1.0)
+                    mask_mat.node_tree.links.new(m_emit.outputs['Emission'], m_out.inputs['Surface'])
+                    temp_obj.data.materials.append(mask_mat)
+                    
+                    # Store Data
+                    _debug_storage['mask_repair_data'] = {
+                        'temp_objects': [temp_obj.name],
+                        'original_textures': {obj_name: tex_name},
+                        'original_object_names': [obj_name]
+                    }
+                    
+                    print(f"2.3 [DEBUG] Temp Object Created & Linked: {temp_obj.name}")
+                    
+                    # SELECT TEMP for Step 2
+                    bpy.ops.object.mode_set(mode='OBJECT')
+                    bpy.ops.object.select_all(action='DESELECT')
+                    temp_obj.select_set(True)
+                    context.view_layer.objects.active = temp_obj
+                    
+                    props.debug_step += 1
+                else:
+                    print("2.0 [DEBUG] Not in Repair Mode, skipping to Step 3")
+                    props.debug_step = 3 # Skip to Mock API
+            
+            # STEP 2: Material & UV Setup
+            elif step == 2:
+                print("3 [DEBUG] Setting up Materials & UVs...")
+                mask_repair_data = _debug_storage.get('mask_repair_data')
+                
+                # Need Viewport Data for UV Projection
+                viewport_area = next((a for a in context.screen.areas if a.type == 'VIEW_3D'), None)
+                region = viewport_area.regions[-1]
+                v_width, v_height = region.width, region.height
+                space_data = next(s for s in viewport_area.spaces if s.type == 'VIEW_3D')
+                has_camera = scene.camera is not None
+                
+                # Shared Material (Magenta)
+                mat_name = "Gemini_Projection_Material"
+                material = bpy.data.materials.get(mat_name)
+                if not material:
+                    material = bpy.data.materials.new(name=mat_name)
+                    material.use_nodes = True
+                
+                nodes = material.node_tree.nodes
+                nodes.clear()
+                out = nodes.new("ShaderNodeOutputMaterial")
+                emit = nodes.new("ShaderNodeEmission")
+                emit.inputs['Color'].default_value = (1.0, 0.0, 1.0, 1.0) # MAGENTA
+                material.node_tree.links.new(emit.outputs['Emission'], out.inputs['Surface'])
+                
+                if mask_repair_data:
+                     # Get Temp Obj
+                     temp_name = mask_repair_data['temp_objects'][0]
+                     temp_obj = bpy.data.objects.get(temp_name)
+                     original_name = mask_repair_data['original_object_names'][0]
+                     
+                     if temp_obj:
+                         print(f"3.1 [DEBUG] Applying Material to {temp_obj.name}")
+                         temp_obj.data.materials.clear()
+                         temp_obj.data.materials.append(material)
+                         
+                         print("3.2 [DEBUG] Projecting UVs...")
+                         context.view_layer.objects.active = temp_obj
+                         bpy.ops.object.mode_set(mode='EDIT')
+                         
+                         bm = bmesh.from_edit_mesh(temp_obj.data)
+                         uv_layer = bm.loops.layers.uv.get("Projected UVs") or bm.loops.layers.uv.new("Projected UVs")
+                         
+                         for face in bm.faces:
+                            for loop in face.loops:
+                                world_co = temp_obj.matrix_world @ loop.vert.co
+                                if has_camera:
+                                     screen_co = object_utils.world_to_camera_view(scene, scene.camera, world_co)
+                                     uv = (screen_co[0], screen_co[1])
+                                else:
+                                     screen_co = view3d_utils.location_3d_to_region_2d(region, space_data.region_3d, world_co)
+                                     uv = (screen_co[0]/v_width, screen_co[1]/v_height) if screen_co else (0,0)
+                                loop[uv_layer].uv = uv
+                         
+                         bmesh.update_edit_mesh(temp_obj.data)
+                         
+                         # Copy BM explicitly while in valid state
+                         bm_copy = bm.copy() 
+                         
+                         bpy.ops.object.mode_set(mode='OBJECT')
+                         
+                         _debug_storage['target_objects_data'].append({
+                            'object_name': temp_obj.name, 
+                            'original_object_name': original_name,
+                            'bm_copy': bm_copy,
+                            'src_uv_name': "Projected UVs",
+                            'dest_uv_name': ""
+                         })
+                         
+                props.debug_step += 1
+
+            # STEP 3: MOCK API (Image Load)
+            elif step == 3:
+                print("4 [DEBUG] Mock API Load...")
+                init_path = _debug_storage.get('init_img_path')
+                if not init_path or not os.path.exists(init_path):
+                     print("❌ Image capture failed or missing")
+                     return
+                     
+                img = bpy.data.images.load(init_path)
+                img.name = "Gemini_Projection_Result"
+                
+                # Update Material
+                mat = bpy.data.materials.get("Gemini_Projection_Material")
+                nodes = mat.node_tree.nodes
+                nodes.clear()
+                
+                out = nodes.new("ShaderNodeOutputMaterial")
+                emit = nodes.new("ShaderNodeEmission")
+                tex_node = nodes.new("ShaderNodeTexImage")
+                tex_node.name = "Gemini_Image_Node"
+                tex_node.image = img
+                uv_map = nodes.new("ShaderNodeUVMap")
+                uv_map.uv_map = "Projected UVs"
+                
+                links = mat.node_tree.links
+                links.new(uv_map.outputs['UV'], tex_node.inputs['Vector'])
+                links.new(tex_node.outputs['Color'], emit.inputs['Color'])
+                links.new(emit.outputs['Emission'], out.inputs['Surface'])
+                
+                print("4.1 [DEBUG] Material updated with Texture")
+                props.debug_step += 1
+
+            # STEP 4: BAKE
+            elif step == 4:
+                print("5 [DEBUG] BAKING...")
+                
+                for data in _debug_storage['target_objects_data']:
+                    temp_name = data['object_name']
+                    original_name = data.get('original_object_name')
+                    print(f"5.1 [DEBUG] Baking {temp_name} -> {original_name}")
+                    
+                    obj = bpy.data.objects.get(temp_name) # Temp Obj
+                    
+                    mask_data = _debug_storage.get('mask_repair_data')
+                    if mask_data and original_name:
+                        orig_tex_name = mask_data['original_textures'].get(original_name)
+                        orig_tex = bpy.data.images.get(orig_tex_name)
+                        
+                        if obj and orig_tex:
+                            print(f"5.2 [DEBUG] Target Texture: {orig_tex.name}")
+                            
+                            # Incremental Bake Logic
+                            projection_utils.bake(
+                                context=context,
+                                obj=obj,
+                                texture_node_name="Gemini_Image_Node",
+                                target_image=orig_tex, # In-Place
+                                src_uv_name="Projected UVs",
+                                margin=0,
+                                use_clear=False
+                            )
+                            print("✅ Bake Finished")
+                
+                props.debug_step += 1
+            
+            # STEP 5: CLEANUP
+            elif step == 5:
+                print("6 [DEBUG] Cleaning Up...")
+                mask_data = _debug_storage.get('mask_repair_data')
+                if mask_data:
+                    for t in mask_data['temp_objects']:
+                        o = bpy.data.objects.get(t)
+                        if o:
+                            bpy.data.objects.remove(o, do_unlink=True)
+                            print(f"6.1 [DEBUG] Removed {t}")
+                    
+                    # MODIFICATION: Restore selection to original objects
+                    first_obj = None
+                    for orig_name in mask_data.get('original_object_names', []):
+                        o = bpy.data.objects.get(orig_name)
+                        if o:
+                            o.select_set(True)
+                            if not first_obj:
+                                first_obj = o
+                    
+                    if first_obj:
+                        context.view_layer.objects.active = first_obj
+                        print(f"✅ [DEBUG] Restored selection to {first_obj.name}")
+                
+                props.debug_step = 0
+                print("✅✅✅ [DEBUG] SEQUENCE COMPLETE ✅✅✅")
+                self.report({'INFO'}, "Debug Sequence Finished")
+                
+        except Exception as e:
+            print(f"❌ [DEBUG ERROR] Step {step} Failed: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        return None

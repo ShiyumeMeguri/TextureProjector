@@ -1,6 +1,6 @@
 import bpy
 from bpy.types import PropertyGroup, Panel
-from bpy.props import StringProperty, BoolProperty, EnumProperty, FloatProperty, IntProperty, CollectionProperty, PointerProperty
+from bpy.props import StringProperty, BoolProperty, EnumProperty, FloatProperty, IntProperty, CollectionProperty, PointerProperty, FloatVectorProperty
 
 class GeminiRenderHistoryItem(PropertyGroup):
     """Single render history entry with visual preview"""
@@ -204,6 +204,34 @@ class GeminiRenderProperties(PropertyGroup):
         description="Capture wireframe grid instead of color for alignment verification",
         default=False,
     )
+    
+    # Mask Repair Mode settings
+    mask_repair_mode: BoolProperty(
+        name="Mask Repair Mode",
+        description="Use mask-based incremental texture repair - selected faces are masked and AI repairs only that region",
+        default=False,
+    )
+    mask_color: FloatVectorProperty(
+        name="Mask Color",
+        description="Color used for mask rendering (default: red)",
+        subtype='COLOR',
+        size=4,
+        min=0.0,
+        max=1.0,
+        default=(1.0, 0.0, 0.0, 1.0),  # Red, fully opaque
+    )
+    
+    # Debug Mode
+    debug_mode: BoolProperty(
+        name="Debug Mode",
+        description="Enable manual step-by-step debugging",
+        default=False
+    )
+    
+    debug_step: IntProperty(
+        name="Debug Step",
+        default=0
+    )
 
 class BANANA_PT_render_panel(Panel):
     """Main Nano Banana Render Panel"""
@@ -373,8 +401,30 @@ class BANANA_PT_render_panel(Panel):
         row.prop(props, "projection_bake", text="Bake Result to Original UVs")
         row = box.row()
         row.prop(props, "grid_simulation", text="Simulation Mode (Grid)")
+        
+        # Mask Repair Mode
+        row = box.row()
+        row.prop(props, "mask_repair_mode", text="Mask Repair Mode")
+        if props.mask_repair_mode:
+            color_row = box.row()
+            color_row.prop(props, "mask_color", text="Mask Color")
+            info_box = box.box()
+            info_box.scale_y = 0.7
+            info_box.label(text="Mask mode: AI repairs only the masked region", icon='INFO')
+            info_box.label(text="Incremental bake back to original texture")
+        
         if props.projection_bake:
             box.label(text="AI will bake the projection back to the object's texture", icon='INFO')
+
+        # Debug Mode Controls (User Request)
+        layout.separator()
+        box_debug = layout.box()
+        box_debug.prop(props, "debug_mode", text="Start Manual Debug Mode")
+        
+        if props.debug_mode:
+            step_text = f"Next Debug Step ({props.debug_step})"
+            box_debug.operator("gemini.debug_next", text=step_text, icon='PLAY')
+            box_debug.label(text=f"Step {props.debug_step}: Check Console for logs", icon='CONSOLE')
         
         # Validation feedback
         obj = context.active_object

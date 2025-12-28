@@ -35,10 +35,13 @@ def validate_projection(context):
         raise Exception("No faces selected in Edit Mode. Please enter Edit Mode for your meshes and select projection faces.")
     return None
 
-def bake(context, obj, texture_node_name, target_image, src_uv_name="Projected UVs", margin=16):
+def bake(context, obj, texture_node_name, target_image, src_uv_name="Projected UVs", margin=16, use_clear=True):
     """
     Bake projected texture to destination texture using Blender's native baking system.
     Handles margins (dilation) natively and works across all material slots.
+    
+    Args:
+        use_clear: If True, clears target image before baking. Set to False for incremental/repair baking.
     """
     scene = context.scene
     
@@ -135,8 +138,8 @@ def bake(context, obj, texture_node_name, target_image, src_uv_name="Projected U
             raise Exception(f"Object {obj.name} has no valid nodal materials for baking")
 
         # 4. Perform Bake
-        print(f"🔥 [GEMINI] Starting EMIT bake for {obj.name} (Margin: {margin})...")
-        scene.render.bake.use_clear = True
+        print(f"🔥 [GEMINI] Starting EMIT bake for {obj.name} (Margin: {margin}, use_clear: {use_clear})...")
+        scene.render.bake.use_clear = use_clear
         scene.render.bake.margin = margin
         scene.render.bake.target = 'IMAGE_TEXTURES'
         

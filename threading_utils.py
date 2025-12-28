@@ -756,7 +756,7 @@ class FullRenderThread(threading.Thread):
 class ProjectionRenderThread(threading.Thread):
     """Background thread for AI Texture Projection pipeline"""
     
-    def __init__(self, context, api_client, user_prompt, depth_path, init_image_path, target_objects_data, image_node_name, material_name, do_bake, bypass_api=False):
+    def __init__(self, context, api_client, user_prompt, depth_path, init_image_path, target_objects_data, image_node_name, material_name, do_bake, bypass_api=False, mask_repair_data=None):
         super().__init__(daemon=True)
         self.scene = context.scene
         self.api_client = api_client
@@ -768,8 +768,9 @@ class ProjectionRenderThread(threading.Thread):
         self.material_name = material_name
         self.do_bake = do_bake
         self.bypass_api = bypass_api
+        self.mask_repair_data = mask_repair_data  # Contains temp objects, materials, original textures
         self._stop_event = threading.Event()
-        print("[GEMINI] ProjectionRenderThread initialized")
+        print(f"[GEMINI] ProjectionRenderThread initialized (mask_repair={mask_repair_data is not None})")
     
     def stop(self):
         self._stop_event.set()
@@ -851,9 +852,136 @@ class ProjectionRenderThread(threading.Thread):
                     if self.do_bake:
                         update_render_status(self.scene, "Baking projection (Blender Native)...", True)
                         
+                        # AGGRESSIVE POST-BAKE RESTORATION HELPER
+                        def _finalize_object_materials(target_obj, target_img, dest_uv_name, search_img=None, node_name=None):
+                            if not target_obj or not target_obj.data or not hasattr(target_obj.data, 'materials'):
+                                return
+                                
+                            print(f"🔍 [GEMINI] Aggressively finalizing materials for {target_obj.name} (Target UV: {dest_uv_name})")
+                            for slot in target_obj.material_slots:
+                                if slot.material and slot.material.use_nodes:
+                                    m_nodes = slot.material.node_tree.nodes
+                                    m_links = slot.material.node_tree.links
+                                    
+                                    # Force specific restoration for ANY node matching our criteria
+                                    for node in m_nodes:
+                                        is_match = False
+                                        if node.type == 'TEX_IMAGE':
+                                            # Match by direct reference
+                                            if node.image and (node.image == target_img or (search_img and node.image == search_img)):
+                                                is_match = True
+                                            # Match by name
+                                            elif node.name == node_name:
+                                                is_match = True
+                                            # Match by image name match (fuzzy backup)
+                                            elif target_img and node.image and node.image.name == target_img.name:
+                                                is_match = True
+                                        
+                                        if is_match:
+                                            # 1. Update image to the final baked result
+                                            if target_img:
+                                                node.image = target_img
+                                            
+                                            # 2. Fix UV mapping node
+                                            uv_node = None
+                                            if node.inputs['Vector'].is_linked:
+                                                from_node = node.inputs['Vector'].links[0].from_node
+                                                if from_node.type == 'UV_MAP':
+                                                    uv_node = from_node
+                                            
+                                            # If no UV Map node linked, create one
+                                            if not uv_node:
+                                                print(f"🔗 [GEMINI] Linking new UV Map node to {node.name} in {slot.material.name}")
+                                                # Clear existing links to vector
+                                                for l in node.inputs['Vector'].links:
+                                                    m_links.remove(l)
+                                                uv_node = m_nodes.new('ShaderNodeUVMap')
+                                                m_links.new(uv_node.outputs['UV'], node.inputs['Vector'])
+                                            
+                                            # 3. FORCE SET THE UV MAP
+                                            if uv_node:
+                                                uv_node.uv_map = dest_uv_name
+                                                print(f"✅ [GEMINI] Material '{slot.material.name}' node '{node.name}' finalized (UV: {dest_uv_name})")
+
+                            # Also restore active render layer on the mesh itself
+                            if dest_uv_name in target_obj.data.uv_layers:
+                                target_obj.data.uv_layers.active = target_obj.data.uv_layers[dest_uv_name]
+                                target_obj.data.uv_layers[dest_uv_name].active_render = True
+
                         for data in self.target_objects_data:
                             obj = bpy.data.objects.get(data['object_name'])
                             if not obj: continue
+                            
+                            # ============================================================
+                            # STRICT MASK REPAIR GUARD
+                            # ============================================================
+                            if self.mask_repair_data:
+                                # In Repair Mode, we MUST only process items that are explicitly identified as repair sources.
+                                # These items MUST have 'original_object_name' set.
+                                original_obj_name = data.get('original_object_name')
+                                
+                                if not original_obj_name:
+                                    print(f"🛡️ [GEMINI] Mask Repair Mode Active: Skipping non-repair object '{obj.name}' (Guard against global bake leak)")
+                                    continue
+                                    
+                                # Double check: Ensure we are processing the TEMP object (source), not the original
+                                # The Temp object usually has '_MaskTemp' in name, or we check against our list
+                                if obj.name not in self.mask_repair_data.get('temp_objects', []):
+                                     # Careful: if the name check logic in operators.py was loose, we might have mismatch.
+                                     # But generally, rely on original_object_name being present.
+                                     pass
+
+                                print(f"[GEMINI] Mask Repair Mode: Processing Temp Source '{obj.name}' -> Original Target '{original_obj_name}'")
+                                
+                                # Get original texture name
+                                original_tex_name = self.mask_repair_data['original_textures'].get(original_obj_name)
+                                if not original_tex_name or original_tex_name not in bpy.data.images:
+                                    print(f"❌ [GEMINI] Mask Repair Mode: Original texture '{original_tex_name}' not found for {original_obj_name}")
+                                    continue
+                                
+                                original_tex = bpy.data.images[original_tex_name]
+                                print(f"[GEMINI] Mask Repair Mode: Target texture = '{original_tex.name}'")
+                                
+                                # Perform incremental bake - NO CLEAR, NO MARGIN
+                                try:
+                                    print(f"[GEMINI] Mask Repair Mode: Baking with use_clear=False, margin=0")
+                                    projection_utils.bake(
+                                        context=bpy.context,
+                                        obj=obj, # Temp Object as Source
+                                        texture_node_name=self.image_node_name,
+                                        target_image=original_tex, # Target Original Texture
+                                        src_uv_name=data['src_uv_name'],
+                                        margin=0,
+                                        use_clear=False
+                                    )
+                                    print(f"✅ [GEMINI] Mask Repair Mode: Incremental bake completed for {obj.name}")
+                                    
+                                    # UV FIX: Ensure Original Object materials are restored
+                                    orig_obj_ref = bpy.data.objects.get(original_obj_name)
+                                    if orig_obj_ref:
+                                         _finalize_object_materials(
+                                             target_obj=orig_obj_ref, 
+                                             target_img=original_tex, 
+                                             dest_uv_name=data.get('dest_uv_name', "UVMap"),
+                                             node_name=self.image_node_name
+                                         )
+                                         print(f"✅ [GEMINI] Restored active render UV and materials on original object")
+
+                                except Exception as e:
+                                    print(f"❌ [GEMINI] Mask Repair Mode: Bake failed for {obj.name}: {e}")
+                                    import traceback
+                                    traceback.print_exc()
+                                
+                                continue # Skip NORMAL MODE for this item
+                            
+                            # ============================================================
+                            # NORMAL MODE (Only runs if mask_repair_data is None)
+                            # ============================================================
+                            
+                            # CRITICAL: Skip temp mask objects if they somehow got here without mask_repair_data (shouldn't happen but safety)
+                            if '_MaskTemp' in obj.name:
+                                print(f"[GEMINI] Skipping temp mask object '{obj.name}' in normal bake loop")
+                                continue
                             
                             # Create baked image
                             baked_name = f"{obj.name}_Baked_AI"
@@ -872,64 +1000,47 @@ class ProjectionRenderThread(threading.Thread):
                                 obj_mat = material.copy()
                                 obj_mat.name = baked_mat_name
                             
-                            # FORCE SHADELESS - Completely clear and rebuild if it's not our spec
-                            # (This handles existing materials that might have BSDF)
-                            if True: # Always enforce for now to satisfy "彻底清除干净"
-                                o_nodes = obj_mat.node_tree.nodes
-                                o_links = obj_mat.node_tree.links
-                                o_nodes.clear()
-                                # Rebuild shadeless
-                                o_out = o_nodes.new("ShaderNodeOutputMaterial")
-                                o_out.location = (400, 0)
-                                o_emit = o_nodes.new("ShaderNodeEmission")
-                                o_emit.location = (200, 0)
-                                o_emit.inputs['Strength'].default_value = 1.0
-                                o_tex = o_nodes.new("ShaderNodeTexImage")
-                                o_tex.name = self.image_node_name # Link back to the node name we expect
-                                o_tex.location = (0, 0)
-                                o_uv = o_nodes.new("ShaderNodeUVMap")
-                                o_uv.name = "Gemini_UV_Map"
-                                o_uv.location = (-200, 0)
-                                
-                                o_links.new(o_uv.outputs['UV'], o_tex.inputs['Vector'])
-                                o_links.new(o_tex.outputs['Color'], o_emit.inputs['Color'])
-                                o_links.new(o_emit.outputs['Emission'], o_out.inputs['Surface'])
+                            # FORCE SHADELESS - Completely clear and rebuild
+                            o_nodes = obj_mat.node_tree.nodes
+                            o_links = obj_mat.node_tree.links
+                            o_nodes.clear()
+                            o_out = o_nodes.new("ShaderNodeOutputMaterial")
+                            o_out.location = (400, 0)
+                            o_emit = o_nodes.new("ShaderNodeEmission")
+                            o_emit.location = (200, 0)
+                            o_emit.inputs['Strength'].default_value = 1.0
+                            o_tex = o_nodes.new("ShaderNodeTexImage")
+                            o_tex.name = self.image_node_name
+                            o_tex.location = (0, 0)
+                            o_uv = o_nodes.new("ShaderNodeUVMap")
+                            o_uv.name = "Gemini_UV_Map"
+                            o_uv.uv_map = data.get('dest_uv_name', "UVMap") # INITIAL FIX
+                            o_uv.location = (-200, 0)
+                            o_links.new(o_uv.outputs['UV'], o_tex.inputs['Vector'])
+                            o_links.new(o_tex.outputs['Color'], o_emit.inputs['Color'])
+                            o_links.new(o_emit.outputs['Emission'], o_out.inputs['Surface'])
                             
-                            # Assign material to object
-                            # Prepare a unique material for this specific object
-                            # (This ensures we don't accidentally bake two objects into the same material/texture)
-                            unique_mats_map = {} # Original mat -> Object unique mat
-                            
+                            # Unique material assignment
+                            unique_mats_map = {}
                             for m_idx, slot in enumerate(obj.material_slots):
                                 if not slot.material: continue
-                                
-                                # If this material was our projection material or is shared, copy it
                                 mat = slot.material
                                 if mat not in unique_mats_map:
                                     new_mat = mat.copy()
                                     new_mat.name = f"{mat.name}_{obj.name}_Baked"
                                     unique_mats_map[mat] = new_mat
-                                
-                                # Assign the unique copy to the object
                                 obj.data.materials[m_idx] = unique_mats_map[mat]
-                                
-                                # Ensure the projection node in this UNIQUE material has the AI result
                                 if unique_mats_map[mat].use_nodes:
                                     proj_node = unique_mats_map[mat].node_tree.nodes.get(self.image_node_name)
                                     if proj_node:
                                         proj_node.image = res_img
                                         print(f"[GEMINI] Prepared unique material {new_mat.name} with AI result")
 
-                            # 2. Configure UV Layer "Indices" for baking:
-                            # The ACTIVE UV layer is where Blender's bake operator outputs the result.
-                            # We want to bake INTO the target UV (dest_uv_name).
+                            # Configure UV Layer for baking
                             if data['dest_uv_name'] in obj.data.uv_layers:
                                 obj.data.uv_layers.active = obj.data.uv_layers[data['dest_uv_name']]
-                                print(f"[GEMINI] {obj.name} set {data['dest_uv_name']} as active for baking")
-                            
-                            # Ensure active render is also set (often used as fallback)
-                            if data['dest_uv_name'] in obj.data.uv_layers:
                                 obj.data.uv_layers[data['dest_uv_name']].active_render = True
+                                print(f"[GEMINI] {obj.name} set {data['dest_uv_name']} as active for baking")
                             
                             # Perform Native Bake
                             try:
@@ -946,39 +1057,17 @@ class ProjectionRenderThread(threading.Thread):
                                 print(f"❌ [GEMINI] Native bake failed for {obj.name}: {e}")
                                 continue
                             
-                            # 3. POST-BAKE MATERIAL FINALIZATION
-                            # Update all unique materials of this object to use the baked image
-                            for slot in obj.material_slots:
-                                if slot.material and slot.material.use_nodes:
-                                    m_nodes = slot.material.node_tree.nodes
-                                    m_links = slot.material.node_tree.links
-                                    
-                                    t_node = m_nodes.get(self.image_node_name)
-                                    if not t_node:
-                                        continue # Fix for AttributeError
-                                        
-                                    t_node.image = baked_img
-                                    print(f"[GEMINI] Finalized {slot.material.name} with baked image")
-                                        
-                                    # Restore UV mapping to the destination (the UV map we baked to)
-                                    for link in t_node.inputs['Vector'].links:
-                                        if link.from_node.type == 'UV_MAP':
-                                            link.from_node.uv_map = data['dest_uv_name']
-                                            print(f"[GEMINI] Switched {slot.material.name} UV to {data['dest_uv_name']}")
-                                            break
-                                    else:
-                                        # Fallback link creation
-                                        uv_n = next((n for n in m_nodes if n.type == 'UV_MAP'), None) or m_nodes.new('ShaderNodeUVMap')
-                                        uv_n.uv_map = data['dest_uv_name']
-                                        if not t_node.inputs['Vector'].is_linked:
-                                            m_links.new(uv_n.outputs['UV'], t_node.inputs['Vector'])
-                            
-                            # Restore UI active UV
-                            if data['dest_uv_name'] in obj.data.uv_layers:
-                                obj.data.uv_layers.active = obj.data.uv_layers[data['dest_uv_name']]
+                            # Apply to current object
+                            _finalize_object_materials(
+                                target_obj=obj, 
+                                target_img=baked_img, 
+                                dest_uv_name=data.get('dest_uv_name', "UVMap"),
+                                search_img=res_img, # MATCH PREVIEW IMAGE
+                                node_name=self.image_node_name
+                            )
                             
                             baked_img.pack()
-                            print(f"✅ [GEMINI] Bake successful for {obj.name} -> {baked_name}")
+                            print(f"✅ [GEMINI] Bake successful for {obj.name}")
                     
                     update_render_status(self.scene, "Projection completed!", False)
                     
@@ -988,7 +1077,7 @@ class ProjectionRenderThread(threading.Thread):
                     traceback.print_exc()
                     update_render_status(self.scene, f"Error: {str(e)}", False)
                 finally:
-                    # Cleanup
+                    # Cleanup temp files
                     try:
                         if os.path.exists(self.depth_path): os.unlink(self.depth_path)
                         if os.path.exists(self.init_image_path): os.unlink(self.init_image_path)
@@ -996,6 +1085,65 @@ class ProjectionRenderThread(threading.Thread):
                     for data in self.target_objects_data:
                         try: data['bm_copy'].free()
                         except: pass
+                    
+                    # Mask Repair Mode: Cleanup temp objects and materials
+                    if self.mask_repair_data:
+                        print("[GEMINI] Mask Repair Mode: Cleaning up temp objects and materials...")
+                        
+                        # Delete temp mesh objects
+                        for temp_obj_name in self.mask_repair_data.get('temp_objects', []):
+                            try:
+                                temp_obj = bpy.data.objects.get(temp_obj_name)
+                                if temp_obj:
+                                    # Store mesh data reference to delete later
+                                    temp_mesh = temp_obj.data
+                                    
+                                    # Delete object safely with do_unlink=True
+                                    bpy.data.objects.remove(temp_obj, do_unlink=True)
+                                    
+                                    # Delete mesh data if it exists and has no other users
+                                    if temp_mesh and temp_mesh.users == 0:
+                                        bpy.data.meshes.remove(temp_mesh)
+                                        
+                                    print(f"[GEMINI] Mask Repair Mode: Deleted temp object '{temp_obj_name}' and its mesh data")
+                            except Exception as e:
+                                print(f"⚠️ [GEMINI] Mask Repair Mode: Failed to delete temp object '{temp_obj_name}': {e}")
+                        
+                        # Delete temp materials
+                        for temp_mat_name in self.mask_repair_data.get('temp_materials', []):
+                            try:
+                                temp_mat = bpy.data.materials.get(temp_mat_name)
+                                if temp_mat:
+                                    bpy.data.materials.remove(temp_mat)
+                                    print(f"[GEMINI] Mask Repair Mode: Deleted temp material '{temp_mat_name}'")
+                            except Exception as e:
+                                print(f"⚠️ [GEMINI] Mask Repair Mode: Failed to delete temp material '{temp_mat_name}': {e}")
+                        
+                        print("[GEMINI] Mask Repair Mode: Cleanup complete")
+                        
+                        # MODIFICATION: Restore selection to original objects
+                        try:
+                            # 1. Clear selection
+                            bpy.ops.object.select_all(action='DESELECT')
+                            
+                            # 2. Re-select original objects
+                            first_obj = None
+                            for orig_name in self.mask_repair_data.get('original_object_names', []):
+                                o = bpy.data.objects.get(orig_name)
+                                if o:
+                                    o.select_set(True)
+                                    if not first_obj:
+                                        first_obj = o
+                            
+                            # 3. Set active
+                            if first_obj:
+                                bpy.context.view_layer.objects.active = first_obj
+                                print(f"✅ [GEMINI] Restored selection to original object: {first_obj.name}")
+                                
+                                # 4. Optionally restore mode if needed (usually Object mode is safer here)
+                                # For now, just ensure it's selected.
+                        except Exception as e:
+                            print(f"⚠️ [GEMINI] Selection restoration failed: {e}")
 
             execute_in_main_thread(_apply_result)
             
