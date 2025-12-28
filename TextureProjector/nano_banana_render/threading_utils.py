@@ -1016,18 +1016,30 @@ class ProjectionRenderThread(threading.Thread):
                     import os
                     import tempfile
                     
-                    # Save result to temp
-                    with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as f:
-                        f.write(image_data)
-                        temp_res_path = f.name
+                    # 1. Integrate with Render Gallery
+                    # Call load_result_image to record this in history and set 'Render Result'
+                    load_result_image(image_data, "Gemini_Projection_Result", self.user_prompt)
                     
-                    import numpy as np
+                    # Retrieve the image that was just loaded (it might be renamed for history)
+                    # For projection, we use "Gemini_Projection_Result" as the base name
+                    res_img = bpy.data.images.get("Gemini_Projection_Result")
+                    if not res_img:
+                        # Fallback: find the latest AI_Result in history
+                        if len(self.scene.gemini_render.render_history) > 0:
+                            hist_name = self.scene.gemini_render.render_history[-1].image_name
+                            res_img = bpy.data.images.get(hist_name)
                     
-                    # 1. Load image and convert to flat NumPy array (Dream Textures equivalent)
-                    res_img = bpy.data.images.load(temp_res_path)
-                    res_img.name = "Gemini_Projection_Result"
-                    res_img.pack()
-                    os.unlink(temp_res_path)
+                    if not res_img:
+                        # Last resort: load directly if gallery integration is weird
+                        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as f:
+                            f.write(image_data)
+                            temp_res_path = f.name
+                        res_img = bpy.data.images.load(temp_res_path)
+                        res_img.name = "Gemini_Projection_Result"
+                        res_img.pack()
+                        os.unlink(temp_res_path)
+
+                    # Get pixels as NumPy array (Fast)
 
                     # Get pixels as NumPy array (Fast)
                     width, height = res_img.size

@@ -170,6 +170,11 @@ class GEMINI_OT_texture_projection(Operator):
         original_show_overlays = space_data.overlay.show_overlays
         original_shading_type = space_data.shading.type
         
+        # Resolution management for consistent capture
+        original_res_x = scene.render.resolution_x
+        original_res_y = scene.render.resolution_y
+        original_res_pct = scene.render.resolution_percentage
+        
         # Temporary directory for workspace
         temp_dir = tempfile.mkdtemp(prefix="gemini_proj_")
         init_img_path = os.path.join(temp_dir, "init.png")
@@ -179,6 +184,11 @@ class GEMINI_OT_texture_projection(Operator):
         # Configure for capture
         space_data.overlay.show_overlays = False
         scene.render.image_settings.file_format = 'PNG'
+        
+        # Force render resolution to match viewport for viewport renders
+        scene.render.resolution_x = v_width
+        scene.render.resolution_y = v_height
+        scene.render.resolution_percentage = 100
         
         try:
             # A. Capture Color (Native Resolution)
@@ -232,6 +242,11 @@ class GEMINI_OT_texture_projection(Operator):
             scene.render.image_settings.file_format = render_format
             space_data.overlay.show_overlays = original_show_overlays
             space_data.shading.type = original_shading_type
+            
+            # Restore resolution
+            scene.render.resolution_x = original_res_x
+            scene.render.resolution_y = original_res_y
+            scene.render.resolution_percentage = original_res_pct
 
         # 3. Setup Projection Logic (Remapping UVs)
         target_objects_data = []
