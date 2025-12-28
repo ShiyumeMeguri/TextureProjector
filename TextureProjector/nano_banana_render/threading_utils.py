@@ -941,7 +941,7 @@ class FullRenderThread(threading.Thread):
 class ProjectionRenderThread(threading.Thread):
     """Background thread for AI Texture Projection pipeline"""
     
-    def __init__(self, context, api_client, user_prompt, depth_path, init_image_path, target_objects_data, image_node_name, material_name, do_bake):
+    def __init__(self, context, api_client, user_prompt, depth_path, init_image_path, target_objects_data, image_node_name, material_name, do_bake, bypass_api=False):
         super().__init__(daemon=True)
         self.scene = context.scene
         self.api_client = api_client
@@ -952,6 +952,7 @@ class ProjectionRenderThread(threading.Thread):
         self.image_node_name = image_node_name
         self.material_name = material_name
         self.do_bake = do_bake
+        self.bypass_api = bypass_api
         self._stop_event = threading.Event()
         print("[GEMINI] ProjectionRenderThread initialized")
     
@@ -987,15 +988,21 @@ class ProjectionRenderThread(threading.Thread):
             props = self.scene.gemini_render
             resolution = int(props.resolution)
             
-            print(f"🚀 [GEMINI] Calling AI to generate texture...")
-            image_data, mime_type = self.api_client.generate_image(
-                depth_image_path=self.depth_path,
-                user_prompt=projection_prompt,
-                reference_image_path=self.init_image_path,
-                is_color_render=True,
-                width=resolution,
-                height=resolution
-            )
+            if self.bypass_api:
+                print("🛡️ [GEMINI] Simulation Mode: Bypassing AI call, using local grid simulation...")
+                with open(self.init_image_path, 'rb') as f:
+                    image_data = f.read()
+                mime_type = "image/png"
+            else:
+                print(f"🚀 [GEMINI] Calling AI to generate texture...")
+                image_data, mime_type = self.api_client.generate_image(
+                    depth_image_path=self.depth_path,
+                    user_prompt=projection_prompt,
+                    reference_image_path=self.init_image_path,
+                    is_color_render=True,
+                    width=resolution,
+                    height=resolution
+                )
             
             if self._stop_event.is_set():
                 return
@@ -1086,16 +1093,28 @@ class ProjectionRenderThread(threading.Thread):
                             )
                             
                             # Finalize
-                            node.image = baked_img
-                            uv_node = next((n for n in material.node_tree.nodes if n.type == 'UV_MAP'), None)
-                            if uv_node:
-                                uv_node.uv_map = data['dest_uv_name']
+                            # Enforce unique material for each object to prevent overwriting
+                            baked_mat_name = f"{material.name}_{obj.name}_Baked"
+                            obj_mat = bpy.data.materials.get(baked_mat_name) or material.copy()
+                            obj_mat.name = baked_mat_name
+                            
+                            # Update this object's slots
+                            for m_idx, slot in enumerate(obj.material_slots):
+                                if slot.material == material:
+                                    obj.data.materials[m_idx] = obj_mat
+                            
+                            # Update the image and UV on the NEW material
+                            obj_node = obj_mat.node_tree.nodes.get(self.image_node_name)
+                            if obj_node:
+                                obj_node.image = baked_img
+                            
+                            obj_uv_node = next((n for n in obj_mat.node_tree.nodes if n.type == 'UV_MAP'), None)
+                            if obj_uv_node:
+                                obj_uv_node.uv_map = data['dest_uv_name']
                             
                             baked_img.pack()
                             bm.free()
                             print(f"[GEMINI] Baked result to {baked_name}")
-                    
-                    update_render_status(self.scene, "Projection completed!", False)
                     
                     update_render_status(self.scene, "Projection completed!", False)
                     

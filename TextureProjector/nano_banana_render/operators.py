@@ -344,7 +344,8 @@ class GEMINI_OT_texture_projection(Operator):
             target_objects_data=target_objects_data,
             image_node_name=image_node.name,
             material_name=material.name,
-            do_bake=props.projection_bake
+            do_bake=props.projection_bake,
+            bypass_api=props.grid_simulation
         )
         self.current_thread.start()
         
