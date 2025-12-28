@@ -1,13 +1,13 @@
 bl_info = {
-    "name": "Nano Banana Pro Render",
-    "blender": (4, 5, 0),
-    "category": "Render", 
-    "version": (2, 0, 0),
-    "author": "Kovname",
-    "description": "Professional AI rendering and editing suite for Blender. Transform depth maps and edit renders with AI. Supports mask-based editing, style transfer, and iterative refinement.",
-    "location": "3D Viewport > N Panel > Nano Banana Pro, Image Editor > N Panel > Nano Banana Pro Edit",
-    "doc_url": "https://github.com/kovname/nano-banana-render",
-    "tracker_url": "https://github.com/kovname/nano-banana-render/issues",
+    "name": "TextureProjector",
+    "blender": (4, 2, 0),
+    "category": "3D View", 
+    "version": (1, 0, 0),
+    "author": "ShiyumeMeguri",
+    "description": "AI-powered texture projection and repair suite. Seamlessly project AI results onto 3D meshes with automated UV management and mask-based inpainting.",
+    "location": "3D Viewport > N Panel > Gemini",
+    "doc_url": "https://github.com/ShiyumeMeguri/TextureProjector",
+    "tracker_url": "https://github.com/ShiyumeMeguri/TextureProjector/issues",
 }
 
 import bpy

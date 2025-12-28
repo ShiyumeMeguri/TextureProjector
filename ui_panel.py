@@ -234,12 +234,12 @@ class GeminiRenderProperties(PropertyGroup):
     )
 
 class BANANA_PT_render_panel(Panel):
-    """Main Nano Banana Render Panel"""
-    bl_label = "Nano Banana Render"
+    """Main Texture Projector Panel"""
+    bl_label = "Gemini Texture Projector"
     bl_idname = "BANANA_PT_render_panel"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "Nano Banana"
+    bl_category = "Gemini"
     
     def draw(self, context):
         layout = self.layout
@@ -463,11 +463,11 @@ class BANANA_PT_render_panel(Panel):
 
 class BANANA_PT_history_panel(Panel):
     """Visual gallery render history panel"""
-    bl_label = "Render Gallery" 
+    bl_label = "Projection Gallery" 
     bl_idname = "BANANA_PT_history_panel"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "Nano Banana"
+    bl_category = "Gemini"
     bl_parent_id = "BANANA_PT_render_panel"
     
     def draw(self, context):
