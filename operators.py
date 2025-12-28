@@ -1746,7 +1746,7 @@ class GEMINI_OT_debug_next(Operator):
                                 texture_node_name="Gemini_Image_Node",
                                 target_image=orig_tex, # In-Place
                                 src_uv_name="Projected UVs",
-                                margin=0,
+                                margin=1,
                                 use_clear=False
                             )
                             print("✅ Bake Finished")

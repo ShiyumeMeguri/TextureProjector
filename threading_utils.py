@@ -951,7 +951,7 @@ class ProjectionRenderThread(threading.Thread):
                                         texture_node_name=self.image_node_name,
                                         target_image=original_tex, # Target Original Texture
                                         src_uv_name=data['src_uv_name'],
-                                        margin=0,
+                                        margin=1,
                                         use_clear=False
                                     )
                                     print(f"✅ [GEMINI] Mask Repair Mode: Incremental bake completed for {obj.name}")
