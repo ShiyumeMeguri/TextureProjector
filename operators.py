@@ -431,6 +431,118 @@ class GEMINI_OT_texture_projection(Operator):
         original_res_y = scene.render.resolution_y
         original_res_pct = scene.render.resolution_percentage
         
+        # ======================================================================
+        # MASK REPAIR SETUP: Create temp mask mesh WITHOUT affecting original object state
+        # I this is now common to all projection sources (AI and Custom Image)
+        # ======================================================================
+        mask_repair_data = None
+        if props.mask_repair_mode:
+            try:
+                print("Mask Repair Mode: Creating mask overlay mesh...")
+                
+                obj = context.active_object
+                if not obj or obj.type != 'MESH' or obj.mode != 'EDIT':
+                    raise Exception("Active object must be a mesh in Edit Mode")
+                
+                obj_name = obj.name
+                print(f"Mask Repair Mode: Active object = '{obj_name}'")
+                
+                import bmesh
+                bm = bmesh.from_edit_mesh(obj.data)
+                
+                # I count and identify selected faces
+                selected_faces = [f for f in bm.faces if f.select]
+                print(f"Mask Repair Mode: {len(selected_faces)} faces selected")
+                
+                if not selected_faces:
+                    raise Exception("No faces selected")
+                
+                # FACE-AWARE TEXTURE TARGETING: Use material of first selected face
+                target_mat_index = selected_faces[0].material_index
+                original_texture = None
+                
+                if target_mat_index < len(obj.material_slots):
+                    slot = obj.material_slots[target_mat_index]
+                    if slot.material and slot.material.use_nodes:
+                        for node in slot.material.node_tree.nodes:
+                            if node.type == 'TEX_IMAGE' and node.image:
+                                original_texture = node.image
+                                break
+                
+                if not original_texture:
+                    print(" Targeted slot has no image, searching all slots...")
+                    for slot in obj.material_slots:
+                        if slot.material and slot.material.use_nodes:
+                            for node in slot.material.node_tree.nodes:
+                                if node.type == 'TEX_IMAGE' and node.image:
+                                    original_texture = node.image
+                                    break
+                        if original_texture: break
+                
+                if not original_texture:
+                    raise Exception("Original mesh has no textures. Mask Repair requires an existing texture target.")
+
+                bm_copy = bm.copy()
+                
+                # I delete unselected faces from the copy
+                faces_to_delete = [f for f in bm_copy.faces if not f.select]
+                bmesh.ops.delete(bm_copy, geom=faces_to_delete, context='FACES')
+                
+                temp_mesh = bpy.data.meshes.new(f"{obj_name}_MaskTemp_Data")
+                bm_copy.to_mesh(temp_mesh)
+                bm_copy.free()
+                
+                temp_obj = bpy.data.objects.new(f"{obj_name}_MaskTemp", temp_mesh)
+                temp_obj.matrix_world = obj.matrix_world.copy()
+                
+                # I link to scene
+                context.collection.objects.link(temp_obj)
+                
+                # ANTI-ZFIGHTING: Add Solidify modifier with offset=0
+                solidify_mod = temp_obj.modifiers.new(name="Gemini_Solidify", type='SOLIDIFY')
+                solidify_mod.thickness = 0.002  # 2mm total thickness (1mm each direction)
+                solidify_mod.offset = 0  # I expand equally in both directions
+                solidify_mod.use_rim = False  # I no rim faces needed
+                
+                mask_mat_name = "Gemini_Mask_Material_Temp"
+                mask_mat = bpy.data.materials.get(mask_mat_name)
+                if mask_mat:
+                    bpy.data.materials.remove(mask_mat)
+                mask_mat = bpy.data.materials.new(name=mask_mat_name)
+                mask_mat.use_nodes = True
+                mask_nodes = mask_mat.node_tree.nodes
+                mask_links = mask_mat.node_tree.links
+                mask_nodes.clear()
+                
+                mask_output = mask_nodes.new("ShaderNodeOutputMaterial")
+                mask_output.location = (300, 0)
+                mask_emit = mask_nodes.new("ShaderNodeEmission")
+                mask_emit.location = (100, 0)
+                mask_emit.inputs['Color'].default_value = (props.mask_color[0], props.mask_color[1], props.mask_color[2], 1.0)
+                mask_emit.inputs['Strength'].default_value = 1.0
+                mask_links.new(mask_emit.outputs['Emission'], mask_output.inputs['Surface'])
+                
+                # I assign material to temp mesh
+                temp_obj.data.materials.clear()
+                temp_obj.data.materials.append(mask_mat)
+                
+                # I store mask repair data
+                mask_repair_data = {
+                    'temp_objects': [temp_obj.name],
+                    'temp_materials': [mask_mat_name],
+                    'original_textures': {obj_name: original_texture.name},
+                    'original_object_names': [obj_name],
+                }
+                
+                print(f"Mask Repair Mode: Created temp mesh '{temp_obj.name}' for source '{props.projection_source}'")
+                
+            except Exception as mask_error:
+                print(f" Mask Repair Mode setup error: {mask_error}")
+                import traceback
+                traceback.print_exc()
+                self.report({'ERROR'}, f"Mask Repair Setup Failed: {mask_error}. Aborting.")
+                return {'CANCELLED'}
+
         # 2. Logic Branching based on Projection Source
         if props.projection_source == 'IMAGE':
             source_image_override = props.projection_image
@@ -440,7 +552,6 @@ class GEMINI_OT_texture_projection(Operator):
             
             source_path = "" # I not used for 'IMAGE'
             sim_path = ""
-            mask_repair_data = None # I direct image mode doesn't support mask repair for now
             print(f"🖼 Direct Image Mode active: Using '{source_image_override.name}'")
         else:
             source_image_override = None
@@ -457,130 +568,7 @@ class GEMINI_OT_texture_projection(Operator):
             scene.render.resolution_y = capture_height
             scene.render.resolution_percentage = 100
             
-            # I mask Repair Mode: Create temp mask mesh WITHOUT affecting original object state
-            mask_repair_data = None
-            if props.mask_repair_mode:
-                try:
-                    print("Mask Repair Mode: Creating mask overlay mesh...")
-                    
-
-                    obj = context.active_object
-                    if not obj or obj.type != 'MESH' or obj.mode != 'EDIT':
-                        raise Exception("Active object must be a mesh in Edit Mode")
-                    
-                    obj_name = obj.name
-                    print(f"Mask Repair Mode: Active object = '{obj_name}'")
-                    
-
-                    bm = bmesh.from_edit_mesh(obj.data)
-                    
-                    # I count and identify selected faces
-                    selected_faces = [f for f in bm.faces if f.select]
-                    print(f"Mask Repair Mode: {len(selected_faces)} faces selected")
-                    
-                    if not selected_faces:
-                        raise Exception("No faces selected")
-                    
-                    # FACE-AWARE TEXTURE TARGETING: Use material of first selected face
-                    target_mat_index = selected_faces[0].material_index
-                    original_texture = None
-                    
-                    if target_mat_index < len(obj.material_slots):
-                        slot = obj.material_slots[target_mat_index]
-                        if slot.material and slot.material.use_nodes:
-                            for node in slot.material.node_tree.nodes:
-                                if node.type == 'TEX_IMAGE' and node.image:
-                                    original_texture = node.image
-                                    break
-                    
-
-                    if not original_texture:
-                        print(" Targeted slot has no image, searching all slots...")
-                        for slot in obj.material_slots:
-                            if slot.material and slot.material.use_nodes:
-                                for node in slot.material.node_tree.nodes:
-                                    if node.type == 'TEX_IMAGE' and node.image:
-                                        original_texture = node.image
-                                        break
-                            if original_texture: break
-                    
-                    if not selected_faces:
-                        raise Exception("No faces selected")
-                    
-
-                    bm_copy = bm.copy()
-                    
-                    # I delete unselected faces from the copy
-                    faces_to_delete = [f for f in bm_copy.faces if not f.select]
-                    bmesh.ops.delete(bm_copy, geom=faces_to_delete, context='FACES')
-                    
-
-                    temp_mesh = bpy.data.meshes.new(f"{obj_name}_MaskTemp_Data")
-                    bm_copy.to_mesh(temp_mesh)
-                    bm_copy.free()
-                    
-
-                    temp_obj = bpy.data.objects.new(f"{obj_name}_MaskTemp", temp_mesh)
-                    temp_obj.matrix_world = obj.matrix_world.copy()
-                    
-                    # I link to scene
-                    context.collection.objects.link(temp_obj)
-                    
-                    # ANTI-ZFIGHTING: Add Solidify modifier with offset=0
-                    # I this expands the mesh symmetrically in both directions from the original surface,
-                    # which is immune to normal direction issues and prevents z-fighting reliably.
-                    solidify_mod = temp_obj.modifiers.new(name="Gemini_Solidify", type='SOLIDIFY')
-                    solidify_mod.thickness = 0.002  # 2mm total thickness (1mm each direction)
-                    solidify_mod.offset = 0  # I expand equally in both directions
-                    solidify_mod.use_rim = False  # I no rim faces needed
-                    
-
-                    mask_mat_name = "Gemini_Mask_Material_Temp"
-                    mask_mat = bpy.data.materials.get(mask_mat_name)
-                    if mask_mat:
-                        bpy.data.materials.remove(mask_mat)
-                    mask_mat = bpy.data.materials.new(name=mask_mat_name)
-                    mask_mat.use_nodes = True
-                    mask_nodes = mask_mat.node_tree.nodes
-                    mask_links = mask_mat.node_tree.links
-                    mask_nodes.clear()
-                    
-                    mask_output = mask_nodes.new("ShaderNodeOutputMaterial")
-                    mask_output.location = (300, 0)
-                    mask_emit = mask_nodes.new("ShaderNodeEmission")
-                    mask_emit.location = (100, 0)
-                    mask_emit.inputs['Color'].default_value = (props.mask_color[0], props.mask_color[1], props.mask_color[2], 1.0)
-                    mask_emit.inputs['Strength'].default_value = 1.0
-                    mask_links.new(mask_emit.outputs['Emission'], mask_output.inputs['Surface'])
-                    
-                    # I assign material to temp mesh
-                    temp_obj.data.materials.clear()
-                    temp_obj.data.materials.append(mask_mat)
-                    
-                    # I store mask repair data
-                    mask_repair_data = {
-                        'temp_objects': [temp_obj.name],
-                        'temp_materials': [mask_mat_name],
-                        'original_textures': {obj_name: original_texture.name},
-                        'original_object_names': [obj_name],
-                    }
-                    
-                    print(f"Mask Repair Mode: Created temp mesh '{temp_obj.name}' with mask material")
-                    print("Mask Repair Mode: Original object state UNCHANGED")
-                    
-                except Exception as mask_error:
-                    print(f" Mask Repair Mode setup error: {mask_error}")
-                    import traceback
-                    traceback.print_exc()
-                    # CRITICAL CHANGE: Abort immediately to prevent falling back to Standard Mode (which would destroy the texture)
-                    self.report({'ERROR'}, f"Mask Repair Setup Failed: {mask_error}. Aborting to protect texture.")
-                    return {'CANCELLED'}
-            
-            # PRE-FLIGHT CHECK
-            if props.mask_repair_mode and not mask_repair_data:
-                 self.report({'ERROR'}, "Mask Repair Mode active but no mask data generated. Aborting.")
-                 return {'CANCELLED'}
-
+            # Mask Repair setup handled in common block above
             try:
                 # A. Capture Color (Native Resolution)
                 # I forced Resolution Application (for Camera Render)
