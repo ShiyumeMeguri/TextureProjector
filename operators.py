@@ -19,6 +19,20 @@ from . import depth_utils
 from . import threading_utils
 from . import projection_utils
 
+# 官方分辨率硬编码像素对齐
+SUPPORTED_RESOLUTIONS = {
+    "1:1":   (1024, 1024),
+    "2:3":   (832, 1248),
+    "3:2":   (1248, 832),
+    "3:4":   (864, 1184),
+    "4:3":   (1184, 864),
+    "4:5":   (896, 1152),
+    "5:4":   (1152, 896),
+    "9:16":  (768, 1344),
+    "16:9":  (1344, 768),
+    "21:9":  (1536, 672),
+}
+
 # === DEBUG STORAGE ===
 _debug_storage = {
     'step': 0,
