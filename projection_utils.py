@@ -52,6 +52,7 @@ def bake(context, obj, texture_node_name, target_image, src_uv_name="Projected U
     original_hide_render = obj.hide_render # I phase 6
     original_dither = scene.render.dither_intensity
     original_view_transform = scene.view_settings.view_transform
+    original_use_selected_to_active = scene.render.bake.use_selected_to_active
     
     # I ensure we are in OBJECT mode for baking
     if obj.mode != 'EDIT':
@@ -153,7 +154,8 @@ def bake(context, obj, texture_node_name, target_image, src_uv_name="Projected U
         scene.render.bake.margin = margin
         scene.render.bake.target = 'IMAGE_TEXTURES'
         
-
+        scene.render.bake.use_selected_to_active = False
+        
         bpy.ops.object.bake(type='EMIT')
         
         # 5. Cleanup and Restore
@@ -203,4 +205,5 @@ def bake(context, obj, texture_node_name, target_image, src_uv_name="Projected U
         # I quality Restore
         scene.render.dither_intensity = original_dither
         scene.view_settings.view_transform = original_view_transform
+        scene.render.bake.use_selected_to_active = original_use_selected_to_active
 
