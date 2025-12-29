@@ -12,7 +12,7 @@
 ## 🚀 快速上手
 
 1. **安装**: 在 Blender 插件设置中安装 ZIP。
-2. **配置**: 在侧边栏 `Gemini` 面板填入 [API Key](https://aistudio.google.com/)。
+2. **配置**: 在侧边栏 `Gemini` 面板填入 [API Key](https://aistudio.google.com/api-keys/)。
 3. **投影**: 
     - 选中模型并进入**编辑模式**，选中目标面。
     - 在面板中输入自然语言描述（例：“老旧且生锈的重型工业金属板”）。
