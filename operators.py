@@ -278,13 +278,28 @@ def capture_viewport_to_file(operator, context, scene, props, space_data, region
             depth_renderer = depth_utils.DepthRenderer()
             
             if has_camera:
-                # CAMERA DEPTH: Use mist-based depth render from camera
-                print("📷 [GEMINI] Capturing CAMERA DEPTH (mist render)...")
-                raw_depth_path = depth_renderer.render_depth_map_mist(scene, props.mist_start, props.mist_depth, props.mist_falloff)
+                # CAMERA DEPTH: Use unified GPU depth render from camera
+                print("📷 [GEMINI] Capturing CAMERA DEPTH (Unified GPU)...")
+                view_matrix = scene.camera.matrix_world.inverted()
+                # Use context.evaluated_depsgraph_get() for calc_matrix_camera in 4.0+
+                projection_matrix = scene.camera.calc_matrix_camera(context.evaluated_depsgraph_get(), x=v_width, y=v_height)
+                raw_depth_path = depth_renderer.render_depth_gpu(
+                    context, 
+                    width=v_width, 
+                    height=v_height, 
+                    view_matrix=view_matrix, 
+                    projection_matrix=projection_matrix,
+                    invert=True # Keep consistent with previous logic
+                )
             else:
-                # VIEWPORT DEPTH: Fallback viewport depth
-                print("👁️ [GEMINI] Capturing VIEWPORT DEPTH (fallback)...")
-                raw_depth_path = depth_renderer.render_depth_viewport(context, width=v_width, height=v_height)
+                # VIEWPORT DEPTH: Use unified GPU depth render from viewport
+                print("👁️ [GEMINI] Capturing VIEWPORT DEPTH (Unified GPU)...")
+                raw_depth_path = depth_renderer.render_depth_gpu(
+                    context, 
+                    width=v_width, 
+                    height=v_height,
+                    invert=True
+                )
             
             if raw_depth_path and os.path.exists(raw_depth_path):
                 shutil.copy2(raw_depth_path, target_path)

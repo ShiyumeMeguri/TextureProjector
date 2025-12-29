@@ -69,30 +69,32 @@ class DepthRenderer:
             print(f"Warning: Render engine {scene.render.engine} may not support depth pass properly")
     
     
-    def render_depth_viewport(self, context, width=None, height=None, invert=True) -> str:
+    def render_depth_gpu(self, context, width=None, height=None, view_matrix=None, projection_matrix=None, invert=True) -> str:
         """
-        Fastest depth map generation using GPU module directly from viewport matrices.
-        No camera object required.
+        Unified GPU-based depth rendering. 
+        Works for both viewport and camera by passing appropriate matrices.
         """
         import bmesh
         import mathutils
         
         scene = context.scene
+        # For validation, we don't strictly require camera object if matrices are provided
         self.validate_scene(scene, require_camera=False)
         
-        # Get viewport matrices
-        region = context.region
-        rv3d = context.space_data.region_3d
+        # Fallback to viewport if matrices not provided
+        if view_matrix is None or projection_matrix is None:
+            rv3d = context.space_data.region_3d
+            view_matrix = rv3d.view_matrix.copy()
+            projection_matrix = rv3d.window_matrix.copy()
+            width = width or context.region.width
+            height = height or context.region.height
         
-        width = width or region.width
-        height = height or region.height
-        
-        view_matrix = rv3d.view_matrix.copy()
-        projection_matrix = rv3d.window_matrix.copy()
+        width = int(width)
+        height = int(height)
         
         # Create temporary directory for output
-        temp_dir = tempfile.mkdtemp(prefix="gemini_depth_viewport_")
-        depth_path = os.path.join(temp_dir, "viewport_depth.png")
+        temp_dir = tempfile.mkdtemp(prefix="gemini_depth_gpu_")
+        depth_path = os.path.join(temp_dir, "gpu_depth.png")
         self.temp_files.append(depth_path)
         self.temp_dirs.append(temp_dir)
         
@@ -147,6 +149,10 @@ class DepthRenderer:
                 depth_data = np.array(fb.read_depth(0, 0, width, height).to_list())
                 
                 # Invert if requested (1.0 is far, 0.0 is near)
+                # Align with dream-textures: far is 1.0 (black), near is 0.0 (white)? 
+                # Actually dream-textures does: depth = 1 - depth if invert else depth
+                # And standard depth is: 0 is near, 1 is far.
+                # If invert=True, 1 is near, 0 is far (common for AI input where white is close).
                 if invert:
                     depth_data = 1.0 - depth_data
                 
@@ -160,8 +166,7 @@ class DepthRenderer:
                 depth_data = np.clip(depth_data, 0, 1)
                 
                 # Save as image using Blender API
-                img = bpy.data.images.new("temp_viewport_depth", width=width, height=height)
-                # RGBA but we only care about grayscale depth
+                img = bpy.data.images.new("temp_gpu_depth", width=width, height=height)
                 pixels = np.zeros((width * height, 4), dtype=np.float32)
                 pixels[:, 0] = depth_data.ravel()
                 pixels[:, 1] = depth_data.ravel()
@@ -172,8 +177,6 @@ class DepthRenderer:
                 img.file_format = 'PNG'
                 img.save()
                 
-                # DEBUG SAVING REMOVED (Handled by operator for relative paths)
-                    
                 bpy.data.images.remove(img)
             
             offscreen.free()
@@ -184,6 +187,11 @@ class DepthRenderer:
         _execute()
         
         return depth_path
+
+
+    def render_depth_viewport(self, context, width=None, height=None, invert=True) -> str:
+        """Deprecated: Use render_depth_gpu instead."""
+        return self.render_depth_gpu(context, width, height, invert=invert)
 
 
     def render_depth_map_mist(self, scene, mist_start: float = 5.0, mist_depth: float = 25.0, mist_falloff: str = 'LINEAR') -> str:
