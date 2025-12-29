@@ -206,6 +206,7 @@ class GeminiRenderProperties(PropertyGroup):
         items=[
             ('AI', "AI Generated", "Generate texture using AI from captured input"),
             ('IMAGE', "Custom Texture", "Use a selected image directly"),
+            ('VIEW', "Viewport Capture", "Directly project the current viewport screenshot"),
             ('GRID', "Grid", "Use wireframe grid for alignment testing"),
         ],
         default='AI'

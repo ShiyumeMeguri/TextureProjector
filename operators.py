@@ -604,7 +604,15 @@ class GEMINI_OT_texture_projection(Operator):
                 sim_path = ""
                 bypass_api = (props.projection_source != 'AI')
                 
-                if props.projection_source == 'GRID':
+                if props.projection_source == 'VIEW':
+                    # VIEW: Capture color viewport directly as the result
+                    sim_filename = "view_capture.png"
+                    sim_path = os.path.join(temp_dir, sim_filename)
+                    print("📸 Capturing Viewport for Direct Projection (Projection: View)")
+                    
+                    if not capture_viewport_to_file(self, context, scene, props, space_data, region, v_width, v_height, temp_dir, sim_filename, show_wireframe=False, is_depth=False):
+                        raise Exception("Viewport capture failed")
+                elif props.projection_source == 'GRID':
                     # GRID: Capture wireframe
                     sim_filename = "grid_simulation.png"
                     sim_path = os.path.join(temp_dir, sim_filename)
