@@ -649,10 +649,13 @@ class DepthRenderer:
                 
                 print("[GEMINI] Viewport configured for clean camera mist rendering (no overlays)")
                 
-                # Set render output
+                # Set render output (store originals for restoration)
+                original_color_mode = scene.render.image_settings.color_mode
+                original_color_depth = scene.render.image_settings.color_depth
+                
                 scene.render.filepath = mist_output_path
                 scene.render.image_settings.file_format = 'PNG'
-                scene.render.image_settings.color_mode = 'BW'
+                scene.render.image_settings.color_mode = 'BW'  # Grayscale for depth
                 scene.render.image_settings.color_depth = '16'
                 
                 print("[GEMINI] Starting viewport render with mist from camera...")
@@ -727,8 +730,13 @@ class DepthRenderer:
                     except Exception as e:
                         print(f"[GEMINI] Error restoring viewport: {e}")
                 
-                # Restore render filepath
+                # Restore render filepath and color settings
                 scene.render.filepath = original_filepath
+                if 'original_color_mode' in locals():
+                    scene.render.image_settings.color_mode = original_color_mode
+                if 'original_color_depth' in locals():
+                    scene.render.image_settings.color_depth = original_color_depth
+                print("[GEMINI] Render settings restored (filepath, color_mode, color_depth)")
                 
         except Exception as e:
             raise DepthRenderError(f"Viewport mist render failed: {str(e)}")

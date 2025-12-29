@@ -223,19 +223,30 @@ class GEMINI_OT_ai_render(Operator):
 # Note: _validate_projection and bake_projection moved to projection_utils.py
 
 def capture_viewport_to_file(operator, context, scene, props, space_data, region, v_width, v_height, temp_dir, filename, show_wireframe=False, is_depth=False):
-    """Refactored helper for clean viewport capture"""
+    """Refactored helper for viewport/camera capture.
+    
+    CAMERA PRIORITY LOGIC:
+    - If scene has a camera → Use camera render (bpy.ops.render.render)
+    - Otherwise → Fallback to viewport capture (bpy.ops.render.opengl)
+    
+    This ensures pixel-perfect alignment with world_to_camera_view() UV projection.
+    """
     target_path = os.path.join(temp_dir, filename)
     original_shading_type = space_data.shading.type
+    has_camera = scene.camera is not None
     
     try:
         if is_depth:
             # Depth capture logic
             depth_renderer = depth_utils.DepthRenderer()
-            has_camera = scene.camera is not None
             
             if has_camera:
+                # CAMERA DEPTH: Use mist-based depth render from camera
+                print("📷 [GEMINI] Capturing CAMERA DEPTH (mist render)...")
                 raw_depth_path = depth_renderer.render_depth_map_mist(scene, props.mist_start, props.mist_depth, props.mist_falloff)
             else:
+                # VIEWPORT DEPTH: Fallback viewport depth
+                print("👁️ [GEMINI] Capturing VIEWPORT DEPTH (fallback)...")
                 raw_depth_path = depth_renderer.render_depth_viewport(context, width=v_width, height=v_height)
             
             if raw_depth_path and os.path.exists(raw_depth_path):
@@ -243,36 +254,72 @@ def capture_viewport_to_file(operator, context, scene, props, space_data, region
                 return True
             return False
         else:
-            # Regular Viewport Capture (Color or Wireframe)
-            # Store original render engine to restore later
+            # Color/Wireframe capture
             original_render_engine = scene.render.engine
+            original_filepath = scene.render.filepath
             
-            if show_wireframe:
-                space_data.shading.type = 'WIREFRAME'
+            if has_camera and not show_wireframe:
+                # ======================================================
+                # CAMERA RENDER MODE: Use bpy.ops.render.render()
+                # This renders from the scene camera, matching UV projection
+                # ======================================================
+                print(f"📷 [GEMINI] Using CAMERA RENDER for capture (Camera: {scene.camera.name})")
+                
+                # Setup render settings
+                scene.render.filepath = target_path
+                scene.render.image_settings.file_format = 'PNG'
+                
+                # Ensure EEVEE for fast preview render
+                if scene.render.engine not in ['BLENDER_EEVEE', 'BLENDER_EEVEE_NEXT']:
+                    try:
+                        scene.render.engine = 'BLENDER_EEVEE_NEXT'
+                    except:
+                        scene.render.engine = 'BLENDER_EEVEE'
+                    print(f"🔄 [GEMINI] Switched to {scene.render.engine} for camera render")
+                
+                # Execute camera render
+                bpy.ops.render.render(write_still=True)
+                
+                # Restore
+                scene.render.filepath = original_filepath
+                scene.render.engine = original_render_engine
+                
+                print(f"📷 [GEMINI] Camera render saved to: {target_path}")
+                return True
             else:
-                # For Viewport Color mode, we need EEVEE + RENDERED shading
-                if props.projection_source == 'COLOR':
-                    # CRITICAL: Temporarily switch to EEVEE for color capture
-                    if scene.render.engine not in ['BLENDER_EEVEE', 'BLENDER_EEVEE_NEXT']:
-                        try:
-                            scene.render.engine = 'BLENDER_EEVEE_NEXT'
-                        except:
-                            scene.render.engine = 'BLENDER_EEVEE'
-                        print(f"🔄 [GEMINI] Temporarily switched to {scene.render.engine} for color capture")
-                    space_data.shading.type = 'RENDERED'
+                # ======================================================
+                # VIEWPORT RENDER MODE: Use bpy.ops.render.opengl()
+                # Fallback when no camera, or for wireframe simulation
+                # ======================================================
+                print(f"👁️ [GEMINI] Using VIEWPORT RENDER for capture {'(wireframe mode)' if show_wireframe else '(no camera fallback)'}")
+                
+                if show_wireframe:
+                    space_data.shading.type = 'WIREFRAME'
                 else:
-                    space_data.shading.type = 'SOLID'
-            
-            scene.render.filepath = target_path
-            bpy.ops.render.opengl(write_still=True, view_context=True)
-            
-            # Restore state
-            space_data.shading.type = original_shading_type
-            scene.render.engine = original_render_engine
-            return True
+                    # For Viewport Color mode, we need EEVEE + RENDERED shading
+                    if props.projection_source == 'COLOR':
+                        if scene.render.engine not in ['BLENDER_EEVEE', 'BLENDER_EEVEE_NEXT']:
+                            try:
+                                scene.render.engine = 'BLENDER_EEVEE_NEXT'
+                            except:
+                                scene.render.engine = 'BLENDER_EEVEE'
+                            print(f"🔄 [GEMINI] Temporarily switched to {scene.render.engine} for color capture")
+                        space_data.shading.type = 'RENDERED'
+                    else:
+                        space_data.shading.type = 'SOLID'
+                
+                scene.render.filepath = target_path
+                bpy.ops.render.opengl(write_still=True, view_context=True)
+                
+                # Restore state
+                space_data.shading.type = original_shading_type
+                scene.render.engine = original_render_engine
+                return True
             
     except Exception as e:
         print(f"❌ [GEMINI] Capture helper failed: {e}")
+        import traceback
+        traceback.print_exc()
         if 'original_shading_type' in locals():
             space_data.shading.type = original_shading_type
         if 'original_render_engine' in locals():
@@ -324,8 +371,29 @@ class GEMINI_OT_texture_projection(Operator):
         region = viewport_area.regions[-1]
         space_data = next(s for s in viewport_area.spaces if s.type == 'VIEW_3D')
         
-        # Native dimensions for UV calculation
-        v_width, v_height = region.width, region.height
+        # ======================================================================
+        # CAMERA PRIORITY: If camera exists, use camera render + camera resolution
+        # This ensures pixel-perfect UV alignment (world_to_camera_view matches render)
+        # ======================================================================
+        has_camera = scene.camera is not None
+        use_camera_render = has_camera  # Use camera render when camera exists
+        
+        if use_camera_render:
+            # Use scene render resolution for UV calculation (matches camera render output)
+            capture_width = scene.render.resolution_x
+            capture_height = scene.render.resolution_y
+            # Apply resolution percentage
+            capture_width = int(capture_width * scene.render.resolution_percentage / 100)
+            capture_height = int(capture_height * scene.render.resolution_percentage / 100)
+            print(f"📷 [GEMINI] CAMERA MODE: Using camera render resolution {capture_width}x{capture_height}")
+            print(f"📷 [GEMINI] Camera type: {'ORTHO' if scene.camera.data.type == 'ORTHO' else 'PERSP'}")
+        else:
+            # Fallback: Use viewport dimensions
+            capture_width, capture_height = region.width, region.height
+            print(f"👁️ [GEMINI] VIEWPORT MODE: Using viewport resolution {capture_width}x{capture_height}")
+        
+        # UV projection dimensions (CRITICAL: must match capture resolution for pixel alignment)
+        v_width, v_height = capture_width, capture_height
 
         # Store original settings
         render_filepath = scene.render.filepath
@@ -359,9 +427,9 @@ class GEMINI_OT_texture_projection(Operator):
             space_data.overlay.show_overlays = False
             scene.render.image_settings.file_format = 'PNG'
             
-            # Force render resolution to match viewport for viewport renders
-            scene.render.resolution_x = v_width
-            scene.render.resolution_y = v_height
+            # Set render resolution to match capture dimensions
+            scene.render.resolution_x = capture_width
+            scene.render.resolution_y = capture_height
             scene.render.resolution_percentage = 100
             
             # Mask Repair Mode: Create temp mask mesh WITHOUT affecting original object state
@@ -592,7 +660,13 @@ class GEMINI_OT_texture_projection(Operator):
         from bpy_extras import view3d_utils, object_utils
 
         processed_count = 0
-        has_camera = scene.camera is not None
+        # CAMERA PRIORITY: Use camera projection when camera exists (matches camera render used for capture)
+        # This ensures pixel-perfect alignment between capture and UV projection
+        # NOTE: use_camera_render is set earlier based on has_camera
+        if use_camera_render:
+            print(f"📷 [GEMINI] UV Projection: Using CAMERA coordinates (matches camera render)")
+        else:
+            print(f"👁️ [GEMINI] UV Projection: Using VIEWPORT coordinates (fallback)")
         for obj in context.selected_objects:
             if obj.type != 'MESH': continue
             
@@ -631,7 +705,7 @@ class GEMINI_OT_texture_projection(Operator):
                                 face.material_index = 0
                                 for loop in face.loops:
                                     world_co = temp_obj.matrix_world @ loop.vert.co
-                                    if has_camera:
+                                    if use_camera_render:
                                         screen_co = object_utils.world_to_camera_view(scene, scene.camera, world_co)
                                         uv = (screen_co[0], screen_co[1])
                                     else:
@@ -709,7 +783,7 @@ class GEMINI_OT_texture_projection(Operator):
                     face_updated = True
                     for loop in face.loops:
                         world_co = obj.matrix_world @ loop.vert.co
-                        if has_camera:
+                        if use_camera_render:
                             screen_co = object_utils.world_to_camera_view(scene, scene.camera, world_co)
                             uv = (screen_co[0], screen_co[1])
                         else:
@@ -1716,9 +1790,20 @@ class GEMINI_OT_debug_next(Operator):
                 # Need Viewport Data for UV Projection
                 viewport_area = next((a for a in context.screen.areas if a.type == 'VIEW_3D'), None)
                 region = viewport_area.regions[-1]
-                v_width, v_height = region.width, region.height
                 space_data = next(s for s in viewport_area.spaces if s.type == 'VIEW_3D')
+                
+                # CAMERA PRIORITY: Use camera projection when camera exists
+                # This matches the camera render used for capture
                 has_camera = scene.camera is not None
+                use_camera_render = has_camera
+                
+                if use_camera_render:
+                    # Use scene render resolution (matches camera render)
+                    v_width = int(scene.render.resolution_x * scene.render.resolution_percentage / 100)
+                    v_height = int(scene.render.resolution_y * scene.render.resolution_percentage / 100)
+                else:
+                    # Fallback: viewport dimensions
+                    v_width, v_height = region.width, region.height
                 
                 # Shared Material (Magenta)
                 mat_name = "Gemini_Projection_Material"
@@ -1755,7 +1840,7 @@ class GEMINI_OT_debug_next(Operator):
                          for face in bm.faces:
                             for loop in face.loops:
                                 world_co = temp_obj.matrix_world @ loop.vert.co
-                                if has_camera:
+                                if use_camera_render:
                                      screen_co = object_utils.world_to_camera_view(scene, scene.camera, world_co)
                                      uv = (screen_co[0], screen_co[1])
                                 else:
