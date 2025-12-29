@@ -406,6 +406,14 @@ class GEMINI_OT_texture_projection(Operator):
                     # Link to scene
                     context.collection.objects.link(temp_obj)
                     
+                    # ANTI-ZFIGHTING: Add Solidify modifier with offset=0
+                    # This expands the mesh symmetrically in both directions from the original surface,
+                    # which is immune to normal direction issues and prevents z-fighting reliably.
+                    solidify_mod = temp_obj.modifiers.new(name="Gemini_Solidify", type='SOLIDIFY')
+                    solidify_mod.thickness = 0.002  # 2mm total thickness (1mm each direction)
+                    solidify_mod.offset = 0  # Expand equally in both directions
+                    solidify_mod.use_rim = False  # No rim faces needed
+                    
                     # Create mask material
                     mask_mat_name = "Gemini_Mask_Material_Temp"
                     mask_mat = bpy.data.materials.get(mask_mat_name)
