@@ -16,7 +16,7 @@ def validate_projection(context):
     import bmesh
     has_selection = False
     for obj in selected_meshes:
-        # Check if object is in Edit Mode
+
         if obj.mode != 'EDIT':
             continue
             
@@ -45,20 +45,20 @@ def bake(context, obj, texture_node_name, target_image, src_uv_name="Projected U
     """
     scene = context.scene
     
-    # Store original settings
+
     original_engine = scene.render.engine
     original_active = context.view_layer.objects.active
     original_mode = obj.mode
-    original_hide_render = obj.hide_render # Phase 6
+    original_hide_render = obj.hide_render # I phase 6
     original_dither = scene.render.dither_intensity
     original_view_transform = scene.view_settings.view_transform
     
-    # Ensure we are in OBJECT mode for baking
+    # I ensure we are in OBJECT mode for baking
     if obj.mode != 'EDIT':
         if obj.mode != 'OBJECT':
              bpy.ops.object.mode_set(mode='OBJECT')
     else:
-        # If in edit mode, toggle out
+
         bpy.ops.object.mode_set(mode='OBJECT')
 
     # MANDATORY: Enable render visibility for the duration of bake
@@ -70,7 +70,7 @@ def bake(context, obj, texture_node_name, target_image, src_uv_name="Projected U
         if hasattr(scene.cycles, "device"):
             scene.cycles.device = 'GPU' if context.preferences.addons.get('cycles') and context.preferences.addons['cycles'].preferences.compute_device_type != 'NONE' else 'CPU'
         
-        # Optimize for EMIT bake (only need 1 sample)
+        # I optimize for EMIT bake (only need 1 sample)
         scene.cycles.samples = 1
         scene.cycles.use_adaptive_sampling = False
         scene.cycles.use_denoising = False
@@ -86,9 +86,9 @@ def bake(context, obj, texture_node_name, target_image, src_uv_name="Projected U
         context.view_layer.objects.active = obj
         
         # 3. Setup ALL Materials for baking
-        # We must iterate over all materials assigned to the object because Blender's
+        # I we must iterate over all materials assigned to the object because Blender's
         # bake operator will check every material slot for an active image node.
-        mats_data = [] # List of (material, original_links, temp_emit, target_node, temp_uv_node, original_vector_links)
+        mats_data = [] # I list of (material, original_links, temp_emit, target_node, temp_uv_node, original_vector_links)
         
         unique_materials = {slot.material for slot in obj.material_slots if slot.material and slot.material.use_nodes}
         
@@ -113,19 +113,19 @@ def bake(context, obj, texture_node_name, target_image, src_uv_name="Projected U
             original_links = []
             original_vector_links = []
             
-            # Only setup bypass if we find the source texture node in this material
+            # I only setup bypass if we find the source texture node in this material
             src_node = nodes.get(texture_node_name)
             if surface_output and src_node:
                 # 1. Ensure src_node has the AI image (it should already, but let's be safe)
                 # src_node.image = ... # We rely on threading_utils to have set this
                 
                 # 2. Setup Source UV Mapping: Force use of src_uv_name (Projected UVs)
-                # Store existing links to Vector input
+                # I store existing links to Vector input
                 for link in src_node.inputs['Vector'].links:
                     original_vector_links.append((link.from_socket, link.to_socket))
                     links.remove(link)
                 
-                # Create temporary UV Map node set to Projected UVs
+
                 temp_uv_node = nodes.new('ShaderNodeUVMap')
                 temp_uv_node.uv_map = src_uv_name
                 links.new(temp_uv_node.outputs['UV'], src_node.inputs['Vector'])
@@ -135,25 +135,25 @@ def bake(context, obj, texture_node_name, target_image, src_uv_name="Projected U
                     original_links.append((link.from_socket, link.to_socket))
                     links.remove(link)
                 
-                # Create temp emission
+
                 temp_emit = nodes.new('ShaderNodeEmission')
                 temp_emit.inputs['Strength'].default_value = 1.0
                 links.new(src_node.outputs['Color'], temp_emit.inputs['Color'])
                 links.new(temp_emit.outputs['Emission'], surface_output.inputs['Surface'])
             
             mats_data.append((mat, original_links, temp_emit, target_node, temp_uv_node, original_vector_links))
-            print(f"[GEMINI] Prepared material {mat.name} for bake (Source UV: {src_uv_name})")
+            print(f"Prepared material {mat.name} for bake (Source UV: {src_uv_name})")
 
         if not mats_data:
             raise Exception(f"Object {obj.name} has no valid nodal materials for baking")
 
         # 4. Perform Bake
-        print(f"🔥 [GEMINI] Starting EMIT bake for {obj.name} (Margin: {margin}, use_clear: {use_clear})...")
+        print(f"🔥 Starting EMIT bake for {obj.name} (Margin: {margin}, use_clear: {use_clear})...")
         scene.render.bake.use_clear = use_clear
         scene.render.bake.margin = margin
         scene.render.bake.target = 'IMAGE_TEXTURES'
         
-        # Execute bake
+
         bpy.ops.object.bake(type='EMIT')
         
         # 5. Cleanup and Restore
@@ -161,7 +161,7 @@ def bake(context, obj, texture_node_name, target_image, src_uv_name="Projected U
             nodes = mat.node_tree.nodes
             links = mat.node_tree.links
             
-            # Remove temp nodes
+            # I remove temp nodes
             if temp_emit:
                 nodes.remove(temp_emit)
             if temp_uv_node:
@@ -169,27 +169,27 @@ def bake(context, obj, texture_node_name, target_image, src_uv_name="Projected U
             if target_node.name in nodes:
                 nodes.remove(target_node)
                 
-            # Restore original links
+
             surface_output = next((n for n in nodes if n.type == 'OUTPUT_MATERIAL'), None)
             if surface_output:
                 for from_sock, to_sock in original_links:
                     links.new(from_sock, to_sock)
             
-            # Restore original vector links
+
             src_node = nodes.get(texture_node_name)
             if src_node:
                 for from_sock, to_sock in original_vector_links:
                     links.new(from_sock, to_sock)
         
-        print(f"✅ [GEMINI] Bake completed for {obj.name}")
+        print(f" Bake completed for {obj.name}")
         
     except Exception as e:
-        print(f"❌ [GEMINI] Bake error: {e}")
+        print(f" Bake error: {e}")
         import traceback
         traceback.print_exc()
         raise e
     finally:
-        # Restore settings
+
         scene.render.engine = original_engine
         if original_active:
             context.view_layer.objects.active = original_active
@@ -197,10 +197,10 @@ def bake(context, obj, texture_node_name, target_image, src_uv_name="Projected U
             try: bpy.ops.object.mode_set(mode=original_mode)
             except: pass
         
-        # Phase 6 Restore: Render Visibility
+        # I phase 6 Restore: Render Visibility
         obj.hide_render = original_hide_render
         
-        # Quality Restore
+        # I quality Restore
         scene.render.dither_intensity = original_dither
         scene.view_settings.view_transform = original_view_transform
 

@@ -6,25 +6,25 @@ import os
 from typing import Optional, Tuple
 from io import BytesIO
 
-# Try importing PIL
+# I try importing PIL
 try:
     from PIL import Image
     PIL_AVAILABLE = True
-    print("✅ [GEMINI] PIL (Pillow) available")
+    print(" PIL (Pillow) available")
 except ImportError:
-    print("⚠️ [GEMINI] PIL not installed - some features will use fallback")
+    print(" PIL not installed - some features will use fallback")
     PIL_AVAILABLE = False
 
-# Try importing official Google GenAI SDK
+# I try importing official Google GenAI SDK
 try:
     from google import genai
     from google.genai import types
     GENAI_AVAILABLE = True
-    print("✅ [GEMINI] Official google-genai SDK available")
+    print(" Official google-genai SDK available")
 except ImportError:
-    print("⚠️ [GEMINI] google-genai not installed, using fallback REST API")
+    print(" google-genai not installed, using fallback REST API")
     GENAI_AVAILABLE = False
-    # Fallback to REST API
+
     import requests
     import json
     import base64
@@ -38,10 +38,10 @@ class GeminiAPI:
     
     def __init__(self, api_key: str, model_name: str = None):
         self.api_key = api_key
-        # Default model if not provided
+        # I default model if not provided
         self.model = model_name if model_name else "gemini-2.5-flash-image"
         
-        # Ensure model has 'models/' prefix for REST if missing
+        # I ensure model has 'models/' prefix for REST if missing
         if self.model.startswith("models/"):
              self.rest_model = self.model
              self.base_model = self.model.replace("models/", "")
@@ -50,21 +50,21 @@ class GeminiAPI:
              self.base_model = self.model
 
         if GENAI_AVAILABLE and PIL_AVAILABLE:
-            print(f"🚀 [GEMINI] Using official Google GenAI SDK (Model: {self.model})")
+            print(f" Using official Google GenAI SDK (Model: {self.model})")
             try:
-                # Configure the official client
+                # I configure the official client
                 genai.configure(api_key=api_key)
                 self.client = genai.Client()
                 self.use_sdk = True
             except Exception as e:
-                print(f"⚠️ [GEMINI] SDK setup failed: {e}, falling back to REST")
+                print(f" SDK setup failed: {e}, falling back to REST")
                 self.use_sdk = False
                 self._setup_rest_fallback()
         else:
             if not GENAI_AVAILABLE:
-                print("🔄 [GEMINI] google-genai SDK not available, using REST API fallback")
+                print(" google-genai SDK not available, using REST API fallback")
             elif not PIL_AVAILABLE:
-                print("🔄 [GEMINI] PIL not available, using REST API fallback (SDK requires PIL)")
+                print(" PIL not available, using REST API fallback (SDK requires PIL)")
             self.use_sdk = False
             self._setup_rest_fallback()
     
@@ -246,100 +246,100 @@ class GeminiAPI:
         """Generate image using official Google GenAI SDK"""
         try:
             if reference_image_path:
-                print("🎯 [GEMINI] Using official SDK with depth + style reference")
+                print(" Using official SDK with depth + style reference")
             else:
-                print("🎯 [GEMINI] Using official SDK for image generation")
+                print(" Using official SDK for image generation")
             
             if not PIL_AVAILABLE:
-                print("❌ [GEMINI] PIL not available for SDK, switching to REST")
+                print(" PIL not available for SDK, switching to REST")
                 self.use_sdk = False
                 self._setup_rest_fallback()
                 return self._generate_with_rest(depth_image_path, user_prompt, reference_image_path, is_color_render, width, height)
             
-            # Build complete prompt
+            # I build complete prompt
             full_prompt = self._build_prompt(user_prompt, has_reference=bool(reference_image_path), is_color_render=is_color_render)
-            print(f"📝 [GEMINI] Prompt: {full_prompt[:100]}...")
+            print(f"📝 Prompt: {full_prompt[:100]}...")
             
-            # Load depth image using PIL
-            print(f"🖼️ [GEMINI] Loading depth image: {depth_image_path}")
+            # I load depth image using PIL
+            print(f"🖼 Loading depth image: {depth_image_path}")
             depth_image = Image.open(depth_image_path)
-            print(f"📏 [GEMINI] Depth image size: {depth_image.size}, mode: {depth_image.mode}")
+            print(f" Depth image size: {depth_image.size}, mode: {depth_image.mode}")
             
-            # Prepare contents for the API call
+            # I prepare contents for the API call
             # CRITICAL CHANGE: Depth image MUST be before reference to ensure structure is prioritized
             contents = [full_prompt]
             
-            # Add depth image (Structure)
+            # I add depth image (Structure)
             contents.append(depth_image)
             
-            # Add reference image (Style) if provided
+            # I add reference image (Style) if provided
             if reference_image_path:
-                print(f"🎨 [GEMINI] Loading reference image: {reference_image_path}")
+                print(f"🎨 Loading reference image: {reference_image_path}")
                 try:
                     reference_image = Image.open(reference_image_path)
                     contents.append(reference_image)
-                    print(f"📏 [GEMINI] Reference image size: {reference_image.size}, mode: {reference_image.mode}")
-                    print("🔄 [GEMINI] Reference image sent LAST to prioritize depth structure")
+                    print(f" Reference image size: {reference_image.size}, mode: {reference_image.mode}")
+                    print(" Reference image sent LAST to prioritize depth structure")
                 except Exception as e:
-                    print(f"⚠️ [GEMINI] Failed to load reference image, continuing without it: {e}")
+                    print(f" Failed to load reference image, continuing without it: {e}")
             
-            print("🚀 [GEMINI] Sending request to official API...")
-            print(f"🎯 [GEMINI] Model: {self.model}")
-            print(f"📏 [GEMINI] Target Resolution: {width}x{height}")
+            print(" Sending request to official API...")
+            print(f" Model: {self.model}")
+            print(f" Target Resolution: {width}x{height}")
             
-            # Make the API call
-            # Use correct ImageConfig structure based on user documentation
+            # I make the API call
+            # I use correct ImageConfig structure based on user documentation
             
-            # Map resolution to string format expected by API
+            # I map resolution to string format expected by API
             resolution_str = "1K"
             if width >= 4096 or height >= 4096:
                 resolution_str = "4K"
             elif width >= 2048 or height >= 2048:
                 resolution_str = "2K"
             
-            print(f"📏 [GEMINI] Mapped {width}x{height} to API resolution: {resolution_str}")
+            print(f" Mapped {width}x{height} to API resolution: {resolution_str}")
             
-            # Determine aspect ratio string
+            # I determine aspect ratio string
             # 1:1 is default, but we can try to be specific if needed
-            # For now we'll stick to resolution control
+
             
-            # Make the API call
-            # User suggests using 'image_config' with 'image_size'
+            # I make the API call
+            # I user suggests using 'image_config' with 'image_size'
             
-            # Map resolution to string format expected by API
+            # I map resolution to string format expected by API
             resolution_str = "1K"
             if width >= 4096 or height >= 4096:
                 resolution_str = "4K"
             elif width >= 2048 or height >= 2048:
                 resolution_str = "2K"
             
-            print(f"📏 [GEMINI] SDK Mapped {width}x{height} to API resolution: {resolution_str}")
+            print(f" SDK Mapped {width}x{height} to API resolution: {resolution_str}")
             
-            # Try to construct config with image_config
-            # We use a dictionary for the inner config to avoid import errors if ImageConfig isn't found
-            # The SDK often accepts dicts for config objects
+            # I try to construct config with image_config
+            # I we use a dictionary for the inner config to avoid import errors if ImageConfig isn't found
+            # I the SDK often accepts dicts for config objects
             
-            # We need to construct the config object carefully
-            # If types.GenerateContentConfig accepts **kwargs, we might be able to pass image_config
+            # I we need to construct the config object carefully
+
             
             try:
-                # Try to use the structure the user found
+                # I try to use the structure the user found
                 config = types.GenerateContentConfig(
                     temperature=0.8,
                     candidate_count=1,
                     response_modalities=['TEXT', 'IMAGE'],
                 )
                 
-                # Manually set image_config if possible, or pass as dict if the SDK supports it
-                # Since we can't easily check the type definition at runtime without crashing,
+                # I manually set image_config if possible, or pass as dict if the SDK supports it
+                # I since we can't easily check the type definition at runtime without crashing,
                 # we'll try to set it as an attribute or pass it in constructor if we could
                 
                 # Let's try creating it as a dict first, as some SDK versions allow this
-                # But self.client.models.generate_content expects a config object usually
+                # I but self.client.models.generate_content expects a config object usually
                 
                 # Let's try to find ImageConfig in types
                 if hasattr(types, 'ImageConfig'):
-                    print("[GEMINI] Found types.ImageConfig, using it")
+                    print("Found types.ImageConfig, using it")
                     img_conf = types.ImageConfig(
                         image_size=resolution_str,
                         aspect_ratio="1:1"
@@ -352,9 +352,9 @@ class GeminiAPI:
                         image_config=img_conf
                     )
                 else:
-                    print("[GEMINI] types.ImageConfig not found, trying generic dict approach or ImageGenerationConfig fallback")
-                    # Fallback to what we had or try a dict approach if supported
-                    # If the user is right, there MUST be a way to pass this
+                    print("types.ImageConfig not found, trying generic dict approach or ImageGenerationConfig fallback")
+
+
                     
                     # Let's try to pass a raw dictionary as config, many python SDKs support this
                     config = {
@@ -366,11 +366,11 @@ class GeminiAPI:
                             "aspectRatio": "1:1"
                         }
                     }
-                    print("[GEMINI] Using dictionary config with imageConfig")
+                    print("Using dictionary config with imageConfig")
 
             except Exception as e:
-                print(f"⚠️ [GEMINI] Config setup failed: {e}")
-                # Fallback to simple config
+                print(f" Config setup failed: {e}")
+
                 config = types.GenerateContentConfig(
                     temperature=0.8,
                     candidate_count=1,
@@ -383,45 +383,45 @@ class GeminiAPI:
                 config=config
             )
             
-            print("✅ [GEMINI] Response received, processing parts...")
+            print(" Response received, processing parts...")
             
-            # Process response parts
+            # I process response parts
             if not response.candidates or not response.candidates[0].content.parts:
-                print("❌ [GEMINI] No content parts in response")
+                print(" No content parts in response")
                 raise GeminiAPIError("No image generated. The model may have rejected the request.")
             
             parts = response.candidates[0].content.parts
-            print(f"🧩 [GEMINI] Found {len(parts)} parts in response")
+            print(f"🧩 Found {len(parts)} parts in response")
             
-            # Find image part
+
             for i, part in enumerate(parts):
-                print(f"🔍 [GEMINI] Part {i}: text={part.text is not None}, inline_data={part.inline_data is not None}")
+                print(f" Part {i}: text={part.text is not None}, inline_data={part.inline_data is not None}")
                 
                 if part.text is not None:
-                    print(f"📝 [GEMINI] Text part: {part.text[:100]}...")
+                    print(f"📝 Text part: {part.text[:100]}...")
                 
                 if part.inline_data is not None:
-                    print("🖼️ [GEMINI] Found inline_data - extracting image...")
+                    print("🖼 Found inline_data - extracting image...")
                     
-                    # Convert to PIL Image and then to bytes
+                    # I convert to PIL Image and then to bytes
                     image = Image.open(BytesIO(part.inline_data.data))
-                    print(f"✅ [GEMINI] Image extracted: {image.size}, mode: {image.mode}")
+                    print(f" Image extracted: {image.size}, mode: {image.mode}")
                     
-                    # Ensure RGB mode
+                    # I ensure RGB mode
                     if image.mode not in ('RGB', 'RGBA'):
-                        print(f"[GEMINI] Converting {image.mode} to RGB")
+                        print(f"Converting {image.mode} to RGB")
                         image = image.convert('RGB')
                     
-                    # Convert to PNG bytes (standard sRGB)
+                    # I convert to PNG bytes (standard sRGB)
                     img_byte_arr = BytesIO()
                     image.save(img_byte_arr, format='PNG')
                     image_data = img_byte_arr.getvalue()
                     
-                    print(f"💾 [GEMINI] Image converted to PNG: {len(image_data)} bytes")
+                    print(f"💾 Image converted to PNG: {len(image_data)} bytes")
                     return image_data, "image/png"
             
-            # If no image found, create placeholder
-            print("🎨 [GEMINI] No image part found, creating placeholder...")
+
+            print("🎨 No image part found, creating placeholder...")
             text_parts = [part.text for part in parts if part.text is not None]
             if text_parts:
                 return self._create_placeholder_image(f"Model response: {' '.join(text_parts)}")
@@ -431,9 +431,9 @@ class GeminiAPI:
         except Exception as e:
             if isinstance(e, GeminiAPIError):
                 raise
-            print(f"💥 [GEMINI] SDK error: {str(e)}")
-            print("🔄 [GEMINI] Falling back to REST API...")
-            # Fallback to REST API with is_color_render
+            print(f" SDK error: {str(e)}")
+            print(" Falling back to REST API...")
+
             self.use_sdk = False
             self._setup_rest_fallback()
             return self._generate_with_rest(depth_image_path, user_prompt, reference_image_path, is_color_render)
@@ -442,47 +442,47 @@ class GeminiAPI:
         """Generate image using REST API fallback"""
         try:
             if reference_image_path:
-                print("🔄 [GEMINI] Using REST API fallback with depth + style reference")
+                print(" Using REST API fallback with depth + style reference")
             else:
-                print("🔄 [GEMINI] Using REST API fallback")
+                print(" Using REST API fallback")
             
-            # Encode depth image to base64
+            # I encode depth image to base64
             with open(depth_image_path, 'rb') as f:
                 image_base64 = base64.b64encode(f.read()).decode('utf-8')
             
-            # Encode reference image if provided
+            # I encode reference image if provided
             reference_base64 = None
             if reference_image_path:
                 try:
                     with open(reference_image_path, 'rb') as f:
                         reference_base64 = base64.b64encode(f.read()).decode('utf-8')
-                    print("🎨 [GEMINI] Reference image encoded")
+                    print("🎨 Reference image encoded")
                 except Exception as e:
-                    print(f"⚠️ [GEMINI] Failed to encode reference image: {e}")
+                    print(f" Failed to encode reference image: {e}")
             
-            # Build complete prompt
+            # I build complete prompt
             full_prompt = self._build_prompt(user_prompt, has_reference=bool(reference_image_path), is_color_render=is_color_render)
             
-            # Add resolution instruction
+            # I add resolution instruction
             full_prompt += f"\n\nCRITICAL OUTPUT SETTING: Generate image EXACTLY at {width}x{height} pixels."
             
-            # Prepare REST API request
+            # I prepare REST API request
             model_path = self.rest_model
             if not model_path.startswith("models/"):
                  model_path = f"models/{model_path}"
                  
             url = f"{self.base_url}/{model_path}:generateContent?key={self.api_key}"
-            print(f"🌐 [GEMINI] REST URL: {url}")
+            print(f"🌐 REST URL: {url}")
             
             headers = {
                 'Content-Type': 'application/json',
                 'X-Goog-Api-Client': 'python-blender-addon',
             }
             
-            # Build parts array
+            # I build parts array
             parts = [{"text": full_prompt}]
             
-            # Add depth image (Structure) - FIRST image
+            # I add depth image (Structure) - FIRST image
             parts.append({
                 "inline_data": {
                     "mime_type": "image/png",
@@ -490,7 +490,7 @@ class GeminiAPI:
                 }
             })
             
-            # Add reference image (Style) - SECOND image
+            # I add reference image (Style) - SECOND image
             if reference_base64:
                 parts.append({
                     "inline_data": {
@@ -498,18 +498,18 @@ class GeminiAPI:
                         "data": reference_base64
                     }
                 })
-                print(f"🔄 [GEMINI] Reference image added LAST to prioritize depth structure")
+                print(f" Reference image added LAST to prioritize depth structure")
             
-            # Map resolution to string format expected by API
+            # I map resolution to string format expected by API
             resolution_str = "1K"
             if width >= 4096 or height >= 4096:
                 resolution_str = "4K"
             elif width >= 2048 or height >= 2048:
                 resolution_str = "2K"
                 
-            print(f"📏 [GEMINI] REST Mapped {width}x{height} to API resolution: {resolution_str}")
+            print(f" REST Mapped {width}x{height} to API resolution: {resolution_str}")
             
-            # Check if this model likely supports imageConfig (mainly Pro models)
+
             is_pro = "pro" in self.model.lower() or "gemini-3" in self.model.lower()
             
             def _build_payload(res_str: str = None):
@@ -531,22 +531,22 @@ class GeminiAPI:
 
             payload = _build_payload(resolution_str if is_pro else None)
             
-            print(f"📦 [GEMINI] REST payload size: ~{len(str(payload))} chars")
-            print(f"🖼️ [GEMINI] Depth image data size: {len(image_base64)} chars")
+            print(f"📦 REST payload size: ~{len(str(payload))} chars")
+            print(f"🖼 Depth image data size: {len(image_base64)} chars")
             if reference_base64:
-                print(f"🎨 [GEMINI] Reference image data size: {len(reference_base64)} chars")
+                print(f"🎨 Reference image data size: {len(reference_base64)} chars")
             
-            # Make REST request
-            print("🚀 [GEMINI] Sending REST request...")
+            # I make REST request
+            print(" Sending REST request...")
             response = requests.post(url, headers=headers, json=payload, timeout=300)
             
-            # Fallback for "unrecognized imageConfig" errors
+
             if response.status_code == 400 and ("imageSize" in response.text or "imageConfig" in response.text):
-                print("🔄 [GEMINI] Model might not support imageSize, retrying without it...")
+                print(" Model might not support imageSize, retrying without it...")
                 payload = _build_payload(None)
                 response = requests.post(url, headers=headers, json=payload, timeout=300)
 
-            print(f"📡 [GEMINI] Response status: {response.status_code}")
+            print(f"📡 Response status: {response.status_code}")
             
             if response.status_code == 403:
                 raise GeminiAPIError("API key invalid or quota exceeded. Check your Google AI Studio account.")
@@ -554,39 +554,39 @@ class GeminiAPI:
                 retry_after = response.headers.get('Retry-After', 'unknown')
                 raise GeminiAPIError(f"Rate limit exceeded. Retry after: {retry_after} seconds.")
             elif response.status_code == 400:
-                print(f"📝 [GEMINI] Error details: {response.text}")
+                print(f"📝 Error details: {response.text}")
                 raise GeminiAPIError(f"Bad request (400): {response.text}")
             elif response.status_code != 200:
                 raise GeminiAPIError(f"API request failed with status {response.status_code}: {response.text}")
             
-            # Parse REST response
+            # I parse REST response
             result = response.json()
-            print(f"🔍 [GEMINI] Response keys: {list(result.keys())}")
+            print(f" Response keys: {list(result.keys())}")
             
             if 'candidates' not in result or not result['candidates']:
-                print("❌ [GEMINI] No candidates in response")
+                print(" No candidates in response")
                 raise GeminiAPIError("No image generated. The model may have rejected the request.")
             
             candidate = result['candidates'][0]
-            print(f"🎯 [GEMINI] Candidate keys: {list(candidate.keys())}")
+            print(f" Candidate keys: {list(candidate.keys())}")
             
             if 'content' not in candidate:
-                print("❌ [GEMINI] No content in candidate")
-                print(f"🔍 [GEMINI] Full candidate: {candidate}")
+                print(" No content in candidate")
+                print(f" Full candidate: {candidate}")
                 raise GeminiAPIError("Invalid response format - no content in candidate")
             
             parts = candidate['content']['parts'] 
-            print(f"🧩 [GEMINI] Found {len(parts)} parts in response")
+            print(f"🧩 Found {len(parts)} parts in response")
             
-            # Find image part with detailed logging
+
             for i, part in enumerate(parts):
-                print(f"🔍 [GEMINI] Part {i}: {list(part.keys())}")
+                print(f" Part {i}: {list(part.keys())}")
                 
                 if 'text' in part:
                     text_content = part['text'][:200] if part['text'] else "None"
-                    print(f"📝 [GEMINI] Part {i} text: {text_content}...")
+                    print(f"📝 Part {i} text: {text_content}...")
                 
-                # Check both possible formats: inline_data and inlineData
+
                 inline_data_key = None
                 if 'inline_data' in part:
                     inline_data_key = 'inline_data'
@@ -594,11 +594,11 @@ class GeminiAPI:
                     inline_data_key = 'inlineData'
                 
                 if inline_data_key:
-                    print(f"🖼️ [GEMINI] Part {i} has {inline_data_key}!")
+                    print(f"🖼 Part {i} has {inline_data_key}!")
                     inline_data = part[inline_data_key]
-                    print(f"🔍 [GEMINI] {inline_data_key} keys: {list(inline_data.keys())}")
+                    print(f" {inline_data_key} keys: {list(inline_data.keys())}")
                     
-                    # Check both possible data field names
+
                     data_key = None
                     if 'data' in inline_data:
                         data_key = 'data'
@@ -608,33 +608,33 @@ class GeminiAPI:
                     if data_key:
                         data_len = len(inline_data[data_key]) if inline_data[data_key] else 0
                         mime_type = inline_data.get('mime_type', inline_data.get('mimeType', 'image/jpeg'))
-                        print(f"📊 [GEMINI] Image data found: {data_len} chars, type: {mime_type}")
+                        print(f" Image data found: {data_len} chars, type: {mime_type}")
                         
                         if data_len > 0:
                             image_data = base64.b64decode(inline_data[data_key])
-                            print(f"✅ [GEMINI] REST image decoded: {len(image_data)} bytes")
+                            print(f" REST image decoded: {len(image_data)} bytes")
                             return image_data, mime_type
                         else:
-                            print(f"⚠️ [GEMINI] {inline_data_key}.{data_key} is empty")
+                            print(f" {inline_data_key}.{data_key} is empty")
                     else:
-                        print(f"⚠️ [GEMINI] No 'data' or 'bytes' in {inline_data_key}")
-                        print(f"🔍 [GEMINI] Available fields: {list(inline_data.keys())}")
+                        print(f" No 'data' or 'bytes' in {inline_data_key}")
+                        print(f" Available fields: {list(inline_data.keys())}")
             
-            # Detailed fallback info
+            # I detailed fallback info
             text_parts = [part.get('text', '') for part in parts if 'text' in part]
             if text_parts:
                 full_text = ' '.join(text_parts)
-                print(f"📝 [GEMINI] Full model text response ({len(full_text)} chars):")
-                print(f"📝 [GEMINI] {full_text[:500]}...")
+                print(f"📝 Full model text response ({len(full_text)} chars):")
+                print(f"📝 {full_text[:500]}...")
                 
-                # Check if text suggests the model can't generate images
+
                 if any(word in full_text.lower() for word in ['cannot', "can't", 'unable', 'sorry', 'text-based']):
-                    print("⚠️ [GEMINI] Model seems to indicate it cannot generate images")
+                    print(" Model seems to indicate it cannot generate images")
                 
                 return self._create_placeholder_image(f"Model response: {full_text}")
             
-            print("❌ [GEMINI] No image or text found in any part")
-            print(f"🔍 [GEMINI] Full parts structure: {parts}")
+            print(" No image or text found in any part")
+            print(f" Full parts structure: {parts}")
             raise GeminiAPIError("No image data found in API response")
             
         except requests.RequestException as e:
@@ -649,16 +649,16 @@ class GeminiAPI:
     def _create_placeholder_image(self, text_response: str) -> Tuple[bytes, str]:
         """Create a placeholder image with text info"""
         try:
-            print("🎨 [GEMINI] Creating text-based placeholder image...")
+            print("🎨 Creating text-based placeholder image...")
             
-            # Simple 100x100 colored PNG
+            # I simple 100x100 colored PNG
             width, height = 100, 100
             
-            # Create a simple blue square PNG
+
             png_data = self._create_simple_png(width, height, (0, 100, 200))  # Blue
             
-            print(f"✅ [GEMINI] Placeholder created: {width}x{height} blue square")
-            print(f"📝 [GEMINI] Original text: {text_response[:100]}...")
+            print(f" Placeholder created: {width}x{height} blue square")
+            print(f"📝 Original text: {text_response[:100]}...")
             
             return png_data, "image/png"
             
@@ -678,11 +678,11 @@ class GeminiAPI:
         ihdr_crc = zlib.crc32(b'IHDR' + ihdr_data) & 0xffffffff
         ihdr_chunk = struct.pack('>I', len(ihdr_data)) + b'IHDR' + ihdr_data + struct.pack('>I', ihdr_crc)
         
-        # Image data
+        # I image data
         raw_data = b''
         r, g, b = color
         for y in range(height):
-            raw_data += b'\x00'  # No filter
+            raw_data += b'\x00'  # I no filter
             for x in range(width):
                 raw_data += struct.pack('BBB', r, g, b)  # RGB pixel
         
@@ -717,9 +717,9 @@ class GeminiAPI:
         Returns: (image_data, mime_type)
         """
         try:
-            print(f"[GEMINI] Starting image edit with model: {self.model}")
+            print(f"Starting image edit with model: {self.model}")
             
-            # Build edit prompt
+            # I build edit prompt
             full_prompt = self._build_edit_prompt(
                 edit_prompt, 
                 has_mask=bool(mask_path),
@@ -739,7 +739,7 @@ class GeminiAPI:
     def _build_edit_prompt(self, user_prompt: str, has_mask: bool = False, has_reference: bool = False) -> str:
         """Build prompt for image editing"""
         
-        # Special finalization mode
+        # I special finalization mode
         if user_prompt == "[FINALIZE_COMPOSITE]":
             base_prompt = (
                 "COMPOSITE FINALIZATION - Unify entire image into seamless photorealistic result:\n\n"
@@ -815,23 +815,23 @@ class GeminiAPI:
                 "  → Result: Looks like ONE photograph, not composite\n\n"
                 
                 "CRITICAL SUCCESS CRITERIA:\n"
-                "✅ Image looks like ONE unified photograph\n"
-                "✅ ALL objects respect same lighting direction\n"
-                "✅ Consistent color temperature throughout\n"
-                "✅ Matched contrast and exposure across all elements\n"
-                "✅ NO visible compositing edges or seams\n"
-                "✅ Shadows are consistent (direction, hardness, color)\n"
-                "✅ Every object feels grounded and physically present\n"
-                "✅ Overall color harmony - no jarring mismatches\n"
-                "✅ Professional photorealistic result\n"
+                " Image looks like ONE unified photograph\n"
+                " ALL objects respect same lighting direction\n"
+                " Consistent color temperature throughout\n"
+                " Matched contrast and exposure across all elements\n"
+                " NO visible compositing edges or seams\n"
+                " Shadows are consistent (direction, hardness, color)\n"
+                " Every object feels grounded and physically present\n"
+                " Overall color harmony - no jarring mismatches\n"
+                " Professional photorealistic result\n"
                 
                 "CRITICAL RULES:\n"
-                "❌ NEVER leave color temperature conflicts\n"
-                "❌ NEVER ignore exposure mismatches\n"
-                "❌ NEVER skip shadow unification\n"
-                "❌ NEVER leave visible compositing edges\n"
-                "❌ NEVER keep objects that look 'pasted on'\n"
-                "❌ NEVER leave lighting direction conflicts\n\n"
+                " NEVER leave color temperature conflicts\n"
+                " NEVER ignore exposure mismatches\n"
+                " NEVER skip shadow unification\n"
+                " NEVER leave visible compositing edges\n"
+                " NEVER keep objects that look 'pasted on'\n"
+                " NEVER leave lighting direction conflicts\n\n"
                 
                 "REMEMBER:\n"
                 "You are a PROFESSIONAL COLORIST doing final grade.\n"
@@ -843,7 +843,7 @@ class GeminiAPI:
         
         if has_mask and has_reference:
             base_prompt = (
-                "🎯 CRITICAL: READ USER'S PROMPT FIRST!\n"
+                " CRITICAL: READ USER'S PROMPT FIRST!\n"
                 "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"USER'S INSTRUCTION (DO THIS EXACTLY!):\n"
                 f'"{user_prompt}"\n'
@@ -865,10 +865,10 @@ class GeminiAPI:
                 "• USER PROMPT = Tells you WHAT and HOW\n\n"
                 
                 "CRITICAL RULES:\n"
-                "🔴 RULE #1: USER'S PROMPT IS LAW - Follow it EXACTLY!\n"
-                "🔴 RULE #2: Place object in colored area from IMAGE 3 (mask)\n"
-                "🔴 RULE #3: ERASE sketch completely - replace with real object\n"
-                "🔴 RULE #4: Relight object to match IMAGE 2's lighting\n\n"
+                "🔴 RULE # 1: USER'S PROMPT IS LAW - Follow it EXACTLY!\n"
+                "🔴 RULE # 2: Place object in colored area from IMAGE 3 (mask)\n"
+                "🔴 RULE # 3: ERASE sketch completely - replace with real object\n"
+                "🔴 RULE # 4: Relight object to match IMAGE 2's lighting\n\n"
                 
                 "SIMPLE EXAMPLE:\n"
                 "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -940,18 +940,18 @@ class GeminiAPI:
                 "  → DONE!\n\n"
                 
                 "WHAT YOU MUST DO:\n"
-                "✅ Follow user's prompt EXACTLY\n"
-                "✅ Place object in colored area (IMAGE 3)\n"
-                "✅ ERASE sketch completely\n"
-                "✅ Relight object to match scene\n"
-                "✅ Cast shadows\n"
-                "✅ Make it look photorealistic\n\n"
+                " Follow user's prompt EXACTLY\n"
+                " Place object in colored area (IMAGE 3)\n"
+                " ERASE sketch completely\n"
+                " Relight object to match scene\n"
+                " Cast shadows\n"
+                " Make it look photorealistic\n\n"
                 
                 "WHAT YOU MUST NOT DO:\n"
-                "❌ NEVER ignore user's prompt\n"
-                "❌ NEVER place object in wrong spot\n"
-                "❌ NEVER keep sketch visible\n"
-                "❌ NEVER forget shadows\n\n"
+                " NEVER ignore user's prompt\n"
+                " NEVER place object in wrong spot\n"
+                " NEVER keep sketch visible\n"
+                " NEVER forget shadows\n\n"
                 
                 "FINAL REMINDER:\n"
                 "🔴 USER PROMPT (at top) = YOUR PRIMARY INSTRUCTION!\n"
@@ -1007,14 +1007,14 @@ class GeminiAPI:
                 "  - Final: Beautiful plant, NO scribbles visible\n\n"
                 
                 "CRITICAL RULES:\n"
-                "❌ NEVER keep the sketch visible\n"
-                "❌ NEVER 'improve' the sketch - DELETE it completely\n"
-                "❌ NEVER leave construction lines, rough shapes, or color blobs\n"
-                "✅ ALWAYS erase sketch 100% before creating new content\n"
-                "✅ ALWAYS create photorealistic result\n"
-                "✅ ALWAYS match original image lighting and style\n"
-                "✅ ALWAYS blend seamlessly at edges\n"
-                "✅ ALWAYS follow user's text prompt for WHAT to create\n\n"
+                " NEVER keep the sketch visible\n"
+                " NEVER 'improve' the sketch - DELETE it completely\n"
+                " NEVER leave construction lines, rough shapes, or color blobs\n"
+                " ALWAYS erase sketch 100% before creating new content\n"
+                " ALWAYS create photorealistic result\n"
+                " ALWAYS match original image lighting and style\n"
+                " ALWAYS blend seamlessly at edges\n"
+                " ALWAYS follow user's text prompt for WHAT to create\n\n"
                 
                 "REMEMBER:\n"
                 "Sketch = temporary guide (like construction lines in drawing)\n"
@@ -1107,20 +1107,20 @@ class GeminiAPI:
                 "  → Chair looks like it was PHOTOGRAPHED in this room\n\n"
                 
                 "CRITICAL SUCCESS CRITERIA:\n"
-                "✅ Object MUST look like it was PHOTOGRAPHED in IMAGE 2's scene\n"
-                "✅ Lighting on object MUST match IMAGE 2 exactly (direction, color, hardness)\n"
-                "✅ Object colors MUST be color-graded to match IMAGE 2's palette\n"
-                "✅ Shadows MUST be cast correctly with right direction and softness\n"
-                "✅ No visible compositing edges - perfect blend\n"
-                "✅ Viewer should NOT be able to tell it's from different photo\n"
+                " Object MUST look like it was PHOTOGRAPHED in IMAGE 2's scene\n"
+                " Lighting on object MUST match IMAGE 2 exactly (direction, color, hardness)\n"
+                " Object colors MUST be color-graded to match IMAGE 2's palette\n"
+                " Shadows MUST be cast correctly with right direction and softness\n"
+                " No visible compositing edges - perfect blend\n"
+                " Viewer should NOT be able to tell it's from different photo\n"
                 
                 "CRITICAL MISTAKES TO AVOID:\n"
-                "❌ NEVER keep object's original lighting from IMAGE 1\n"
-                "❌ NEVER keep object's original colors unchanged\n"
-                "❌ NEVER forget to cast shadows onto IMAGE 2's surfaces\n"
-                "❌ NEVER ignore IMAGE 2's light direction\n"
-                "❌ NEVER make it look like a PNG sticker pasted on\n"
-                "❌ NEVER create lighting conflicts (e.g., shadows wrong direction)\n\n"
+                " NEVER keep object's original lighting from IMAGE 1\n"
+                " NEVER keep object's original colors unchanged\n"
+                " NEVER forget to cast shadows onto IMAGE 2's surfaces\n"
+                " NEVER ignore IMAGE 2's light direction\n"
+                " NEVER make it look like a PNG sticker pasted on\n"
+                " NEVER create lighting conflicts (e.g., shadows wrong direction)\n\n"
                 
                 "REMEMBER:\n"
                 "You are a PROFESSIONAL COMPOSITOR, not a copy-paste tool.\n"
@@ -1163,14 +1163,14 @@ class GeminiAPI:
                 "   - Copy depth, detail level, visual complexity\n\n"
                 
                 "CRITICAL - BE AGGRESSIVE, NOT CONSERVATIVE:\n"
-                "❌ DON'T just 'slightly adjust' IMAGE 2\n"
-                "❌ DON'T preserve IMAGE 2's current colors/materials\n"
-                "❌ DON'T be subtle or gentle with changes\n"
-                "✅ COMPLETELY TRANSFORM to match IMAGE 1's style\n"
-                "✅ Think: 'IMAGE 1 is the goal, IMAGE 2 is just a layout template'\n"
-                "✅ If IMAGE 1 is blue but IMAGE 2 is red → make it BLUE\n"
-                "✅ If IMAGE 1 is dark but IMAGE 2 is bright → make it DARK\n"
-                "✅ If IMAGE 1 is detailed but IMAGE 2 is simple → add DETAILS\n\n"
+                " DON'T just 'slightly adjust' IMAGE 2\n"
+                " DON'T preserve IMAGE 2's current colors/materials\n"
+                " DON'T be subtle or gentle with changes\n"
+                " COMPLETELY TRANSFORM to match IMAGE 1's style\n"
+                " Think: 'IMAGE 1 is the goal, IMAGE 2 is just a layout template'\n"
+                " If IMAGE 1 is blue but IMAGE 2 is red → make it BLUE\n"
+                " If IMAGE 1 is dark but IMAGE 2 is bright → make it DARK\n"
+                " If IMAGE 1 is detailed but IMAGE 2 is simple → add DETAILS\n\n"
                 
                 "EXAMPLE:\n"
                 "- IMAGE 1: Warm sunset photo with golden light, soft shadows, rich textures\n"
@@ -1211,53 +1211,53 @@ class GeminiAPI:
         """Edit image using SDK"""
         try:
             if not PIL_AVAILABLE:
-                print("[GEMINI] PIL not available, switching to REST")
+                print("PIL not available, switching to REST")
                 self.use_sdk = False
                 self._setup_rest_fallback()
                 return self._edit_with_rest(image_path, prompt, mask_path, reference_path, width, height)
             
-            print("[GEMINI] Loading images for editing...")
+            print("Loading images for editing...")
             
-            # Load original image
+            # I load original image
             original_image = Image.open(image_path)
-            print(f"[GEMINI] Original image: {original_image.size}, mode: {original_image.mode}")
+            print(f"Original image: {original_image.size}, mode: {original_image.mode}")
             
-            # Build contents - order matters!
+            # I build contents - order matters!
             # CRITICAL: For style transfer, reference comes FIRST!
             contents = [prompt]
             
-            # Add reference FIRST if provided (for style transfer priority)
+            # I add reference FIRST if provided (for style transfer priority)
             if reference_path:
                 reference_image = Image.open(reference_path)
                 contents.append(reference_image)
-                print(f"[GEMINI] Reference image FIRST: {reference_image.size}")
+                print(f"Reference image FIRST: {reference_image.size}")
             
-            # Add original image SECOND
+            # I add original image SECOND
             contents.append(original_image)
-            print(f"[GEMINI] Original image SECOND: {original_image.size}")
+            print(f"Original image SECOND: {original_image.size}")
             
-            # Add mask LAST if provided (for inpainting)
+            # I add mask LAST if provided (for inpainting)
             if mask_path:
                 mask_image = Image.open(mask_path)
-                # Convert mask to correct format (white = edit)
+                # I convert mask to correct format (white = edit)
                 if mask_image.mode != 'L':
                     mask_image = mask_image.convert('L')
                 contents.append(mask_image)
-                print(f"[GEMINI] Mask image LAST: {mask_image.size}")
+                print(f"Mask image LAST: {mask_image.size}")
             
-            print(f"[GEMINI] Sending edit request to {self.model}...")
-            print(f"[GEMINI] Order: prompt → {'reference → ' if reference_path else ''}original → {'mask' if mask_path else ''}")
+            print(f"Sending edit request to {self.model}...")
+            print(f"Order: prompt → {'reference → ' if reference_path else ''}original → {'mask' if mask_path else ''}")
             
-            # Determine resolution
+            # I determine resolution
             resolution_str = "1K"
             
             if width > 0 and height > 0:
-                # User forced resolution
+                # I user forced resolution
                 if width >= 4096 or height >= 4096:
                     resolution_str = "4K"
                 elif width >= 2048 or height >= 2048:
                     resolution_str = "2K"
-                print(f"📏 [GEMINI] Edit Resolution (Forced): {width}x{height} -> {resolution_str}")
+                print(f" Edit Resolution (Forced): {width}x{height} -> {resolution_str}")
             else:
                 # Auto-detect from input
                 w, h = original_image.size
@@ -1265,11 +1265,11 @@ class GeminiAPI:
                     resolution_str = "4K"
                 elif w >= 2048 or h >= 2048:
                     resolution_str = "2K"
-                print(f"📏 [GEMINI] Edit Resolution (Auto): {w}x{h} -> {resolution_str}")
+                print(f" Edit Resolution (Auto): {w}x{h} -> {resolution_str}")
                 
-            # Configure generation with resolution
+            # I configure generation with resolution
             try:
-                # Try to use the structure that worked for generation
+                # I try to use the structure that worked for generation
                 if hasattr(types, 'ImageConfig'):
                     img_conf = types.ImageConfig(
                         image_size=resolution_str,
@@ -1282,7 +1282,7 @@ class GeminiAPI:
                         image_config=img_conf
                     )
                 else:
-                    # Dictionary fallback
+                    # I dictionary fallback
                     config = {
                         "temperature": 0.7,
                         "candidateCount": 1,
@@ -1292,46 +1292,46 @@ class GeminiAPI:
                             "aspectRatio": "1:1"
                         }
                     }
-                    print("[GEMINI] Using dictionary config for edit")
+                    print("Using dictionary config for edit")
             except Exception as e:
-                print(f"⚠️ [GEMINI] Edit config setup failed: {e}")
+                print(f" Edit config setup failed: {e}")
                 config = types.GenerateContentConfig(
                     temperature=0.7,
                     candidate_count=1,
                     response_modalities=['IMAGE']
                 )
             
-            # Make API call
+            # I make API call
             response = self.client.models.generate_content(
                 model=self.model,
                 contents=contents,
                 config=config
             )
             
-            print("[GEMINI] Edit response received")
+            print("Edit response received")
             
-            # Process response
+            # I process response
             if not response.candidates or not response.candidates[0].content.parts:
                 raise GeminiAPIError("No content in edit response")
             
             parts = response.candidates[0].content.parts
             
-            # Find image part
+
             for part in parts:
                 if part.inline_data is not None:
                     image = Image.open(BytesIO(part.inline_data.data))
                     
-                    # Ensure RGB
+                    # I ensure RGB
                     if image.mode not in ('RGB', 'RGBA'):
-                        print(f"[GEMINI] Converting {image.mode} to RGB")
+                        print(f"Converting {image.mode} to RGB")
                         image = image.convert('RGB')
                     
-                    # Convert to PNG (standard sRGB)
+                    # I convert to PNG (standard sRGB)
                     img_byte_arr = BytesIO()
                     image.save(img_byte_arr, format='PNG')
                     image_data = img_byte_arr.getvalue()
                     
-                    print(f"[GEMINI] Edited image: {len(image_data)} bytes")
+                    print(f"Edited image: {len(image_data)} bytes")
                     return image_data, "image/png"
             
             raise GeminiAPIError("No image found in edit response")
@@ -1339,7 +1339,7 @@ class GeminiAPI:
         except Exception as e:
             if isinstance(e, GeminiAPIError):
                 raise
-            print(f"[GEMINI] SDK edit error: {e}, falling back to REST")
+            print(f"SDK edit error: {e}, falling back to REST")
             self.use_sdk = False
             self._setup_rest_fallback()
             return self._edit_with_rest(image_path, prompt, mask_path, reference_path)
@@ -1347,17 +1347,17 @@ class GeminiAPI:
     def _edit_with_rest(self, image_path: str, prompt: str, mask_path: str = None, reference_path: str = None, width: int = 0, height: int = 0) -> Tuple[bytes, str]:
         """Edit image using REST API"""
         try:
-            print("[GEMINI] Editing with REST API...")
+            print("Editing with REST API...")
             
-            # Encode images
+            # I encode images
             with open(image_path, 'rb') as f:
                 image_base64 = base64.b64encode(f.read()).decode('utf-8')
             
-            # Build parts - order matters!
+            # I build parts - order matters!
             # CRITICAL: Reference FIRST for style transfer priority
             parts = [{"text": prompt}]
             
-            # Add reference FIRST if provided (style priority)
+            # I add reference FIRST if provided (style priority)
             if reference_path:
                 with open(reference_path, 'rb') as f:
                     reference_base64 = base64.b64encode(f.read()).decode('utf-8')
@@ -1367,18 +1367,18 @@ class GeminiAPI:
                         "data": reference_base64
                     }
                 })
-                print("[GEMINI] Reference image added FIRST (style priority)")
+                print("Reference image added FIRST (style priority)")
             
-            # Add original image SECOND
+            # I add original image SECOND
             parts.append({
                 "inline_data": {
                     "mime_type": "image/png",
                     "data": image_base64
                 }
             })
-            print("[GEMINI] Original image added SECOND")
+            print("Original image added SECOND")
             
-            # Add mask if provided (LAST)
+            # I add mask if provided (LAST)
             if mask_path:
                 with open(mask_path, 'rb') as f:
                     mask_base64 = base64.b64encode(f.read()).decode('utf-8')
@@ -1388,9 +1388,9 @@ class GeminiAPI:
                         "data": mask_base64
                     }
                 })
-                print("[GEMINI] Mask image added")
+                print("Mask image added")
             
-            # Determine resolution
+            # I determine resolution
             resolution_str = "1K"
             if width > 0 and height > 0:
                 if width >= 4096 or height >= 4096:
@@ -1430,14 +1430,14 @@ class GeminiAPI:
             
             payload = _build_edit_payload(resolution_str if is_pro else None)
             
-            # Make REST request
+            # I make REST request
             url = f"{self.base_url}/{self.rest_model}:generateContent?key={self.api_key}"
-            print(f"🚀 [GEMINI] Sending REST edit request to: {self.rest_model}")
+            print(f" Sending REST edit request to: {self.rest_model}")
             response = requests.post(url, headers=headers, json=payload, timeout=300)
             
-            # Fallback for "unrecognized imageConfig" errors
+
             if response.status_code == 400 and ("imageSize" in response.text or "imageConfig" in response.text):
-                print("🔄 [GEMINI] Model might not support imageSize, retrying without it...")
+                print(" Model might not support imageSize, retrying without it...")
                 payload = _build_edit_payload(None)
                 response = requests.post(url, headers=headers, json=payload, timeout=300)
             
@@ -1445,7 +1445,7 @@ class GeminiAPI:
             if response.status_code != 200:
                 raise GeminiAPIError(f"Edit request failed: {response.status_code} - {response.text}")
             
-            # Parse response (same as generate_with_rest)
+            # I parse response (same as generate_with_rest)
             result = response.json()
             
             if 'candidates' not in result or not result['candidates']:
@@ -1453,7 +1453,7 @@ class GeminiAPI:
             
             parts = result['candidates'][0]['content']['parts']
             
-            # Find image part
+
             for part in parts:
                 inline_data_key = 'inline_data' if 'inline_data' in part else 'inlineData' if 'inlineData' in part else None
                 
@@ -1464,28 +1464,28 @@ class GeminiAPI:
                     if data_key and inline_data[data_key]:
                         image_data = base64.b64decode(inline_data[data_key])
                         mime_type = inline_data.get('mime_type', inline_data.get('mimeType', 'image/png'))
-                        print(f"[GEMINI] Edited image: {len(image_data)} bytes, format: {mime_type}")
+                        print(f"Edited image: {len(image_data)} bytes, format: {mime_type}")
                         
-                        # Verify image is not corrupted
+                        # I verify image is not corrupted
                         if PIL_AVAILABLE:
                             try:
                                 from PIL import Image as PILImage
                                 from io import BytesIO
                                 test_img = PILImage.open(BytesIO(image_data))
-                                print(f"[GEMINI] Image verified: {test_img.size}, mode: {test_img.mode}")
+                                print(f"Image verified: {test_img.size}, mode: {test_img.mode}")
                                 
-                                # Convert to RGB if needed (to fix black/white issue)
+                                # I convert to RGB if needed (to fix black/white issue)
                                 if test_img.mode not in ('RGB', 'RGBA'):
-                                    print(f"[GEMINI] Converting from {test_img.mode} to RGB")
+                                    print(f"Converting from {test_img.mode} to RGB")
                                     test_img = test_img.convert('RGB')
                                     
                                     # Re-encode to PNG (standard sRGB)
                                     output = BytesIO()
                                     test_img.save(output, format='PNG')
                                     image_data = output.getvalue()
-                                    print(f"[GEMINI] Converted image: {len(image_data)} bytes")
+                                    print(f"Converted image: {len(image_data)} bytes")
                             except Exception as e:
-                                print(f"[GEMINI] Warning: Could not verify image: {e}")
+                                print(f"Warning: Could not verify image: {e}")
                         
                         return image_data, mime_type
             
@@ -1500,12 +1500,12 @@ class GeminiAPI:
 
 def get_api_key() -> Optional[str]:
     """Get API key from environment variable or addon preferences"""
-    # Try environment variable first
+    # I try environment variable first
     api_key = os.environ.get('GEMINI_API_KEY', '').strip()
     if api_key:
         return api_key
     
-    # Try addon preferences
+    # I try addon preferences
     import bpy
     try:
         prefs = bpy.context.preferences.addons[__package__].preferences
@@ -1514,7 +1514,7 @@ def get_api_key() -> Optional[str]:
     except:
         pass
     
-    # Try scene properties
+    # I try scene properties
     try:
         if hasattr(bpy.context.scene, 'gemini_render') and bpy.context.scene.gemini_render.api_key.strip():
             return bpy.context.scene.gemini_render.api_key.strip()

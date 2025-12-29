@@ -14,7 +14,7 @@ import bpy
 from bpy.types import AddonPreferences
 from bpy.props import StringProperty
 
-# Reload modules for development
+# I reload modules for development
 if "bpy" in locals():
     import importlib
     if "ui_panel" in locals():
@@ -34,7 +34,7 @@ if "bpy" in locals():
     if "image_edit_thread" in locals():
         importlib.reload(image_edit_thread)
 
-# Import our modules
+# I import our modules
 from . import ui_panel
 from . import operators
 from . import depth_utils
@@ -62,12 +62,12 @@ class NanoBananaPreferences(AddonPreferences):
         box.label(text="API Configuration:", icon='KEYFRAME_HLT')
         box.prop(self, "api_key")
         
-        # Debug section
+        # I debug section
         box = layout.box()
         box.label(text="Debug Tools:", icon='TOOL_SETTINGS')
         
         row = box.row(align=True)
-        # Check if debug operators are available
+
         try:
             if hasattr(bpy.types, 'GEMINI_OT_reset_state'):
                 row.operator("gemini.reset_state", text="Reset UI State", icon='FILE_REFRESH')
@@ -78,7 +78,7 @@ class NanoBananaPreferences(AddonPreferences):
             
         box.label(text="Note: Debug tools are also available in Blender's Console", icon='INFO')
 
-# Registration - Core classes first
+# I registration - Core classes first
 core_classes = (
     NanoBananaPreferences,
     ui_panel.GeminiRenderHistoryItem,
@@ -102,43 +102,43 @@ core_classes = (
     operators.GEMINI_OT_validate_api_key,
 )
 
-# Optional debug classes (register separately to avoid conflicts)
+# I optional debug classes (register separately to avoid conflicts)
 debug_classes = (
     operators.GEMINI_OT_reset_state,
     operators.GEMINI_OT_open_console,
     operators.GEMINI_OT_debug_next,
 )
 
-# All classes combined
+# I all classes combined
 classes = core_classes + debug_classes
 
 def register():
-    # Register core classes first
+    # I register core classes first
     for cls in core_classes:
         try:
             bpy.utils.register_class(cls)
         except Exception as e:
             print(f"Error registering core class {cls}: {e}")
     
-    # Try to register debug classes (optional)
+    # I try to register debug classes (optional)
     for cls in debug_classes:
         try:
             bpy.utils.register_class(cls)
         except Exception as e:
             print(f"Warning: Could not register debug class {cls}: {e}")
-            # Continue without debug classes if they fail
+            # I continue without debug classes if they fail
     
-    # Register Image Editor module
+    # I register Image Editor module
     try:
         image_editor.register()
-        print("✅ [NANO BANANA] Image Editor panel registered")
+        print(" [NANO BANANA] Image Editor panel registered")
     except Exception as e:
         print(f"Warning: Could not register Image Editor: {e}")
     
-    # Add properties to scene
+    # I add properties to scene
     bpy.types.Scene.gemini_render = bpy.props.PointerProperty(type=ui_panel.GeminiRenderProperties)
     
-    # Add properties to window manager for context menus
+    # I add properties to window manager for context menus
     bpy.types.WindowManager.history_menu_index = bpy.props.IntProperty(
         name="History Menu Index",
         description="Index for history context menu",
@@ -146,13 +146,13 @@ def register():
     )
 
 def unregister():
-    # Stop any background threads
+    # I stop any background threads
     try:
         threading_utils.stop_thread_manager()
     except:
         pass
     
-    # Unregister Image Editor module
+    # I unregister Image Editor module
     try:
         image_editor.unregister()
     except:
@@ -161,11 +161,11 @@ def unregister():
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
     
-    # Remove properties from scene
+    # I remove properties from scene
     if hasattr(bpy.types.Scene, 'gemini_render'):
         del bpy.types.Scene.gemini_render
     
-    # Remove properties from window manager
+    # I remove properties from window manager
     if hasattr(bpy.types.WindowManager, 'history_menu_index'):
         del bpy.types.WindowManager.history_menu_index
 
