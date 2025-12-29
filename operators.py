@@ -230,11 +230,21 @@ def capture_viewport_to_file(operator, context, scene, props, space_data, region
             return False
         else:
             # Regular Viewport Capture (Color or Wireframe)
+            # Store original render engine to restore later
+            original_render_engine = scene.render.engine
+            
             if show_wireframe:
                 space_data.shading.type = 'WIREFRAME'
             else:
-                # For Viewport Color mode, we want TEXTURE rendering
+                # For Viewport Color mode, we need EEVEE + RENDERED shading
                 if props.projection_source == 'COLOR':
+                    # CRITICAL: Temporarily switch to EEVEE for color capture
+                    if scene.render.engine not in ['BLENDER_EEVEE', 'BLENDER_EEVEE_NEXT']:
+                        try:
+                            scene.render.engine = 'BLENDER_EEVEE_NEXT'
+                        except:
+                            scene.render.engine = 'BLENDER_EEVEE'
+                        print(f"🔄 [GEMINI] Temporarily switched to {scene.render.engine} for color capture")
                     space_data.shading.type = 'RENDERED'
                 else:
                     space_data.shading.type = 'SOLID'
@@ -244,12 +254,15 @@ def capture_viewport_to_file(operator, context, scene, props, space_data, region
             
             # Restore state
             space_data.shading.type = original_shading_type
+            scene.render.engine = original_render_engine
             return True
             
     except Exception as e:
         print(f"❌ [GEMINI] Capture helper failed: {e}")
         if 'original_shading_type' in locals():
             space_data.shading.type = original_shading_type
+        if 'original_render_engine' in locals():
+            scene.render.engine = original_render_engine
         return False
 
 class GEMINI_OT_texture_projection(Operator):
