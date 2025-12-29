@@ -189,20 +189,42 @@ class GeminiRenderProperties(PropertyGroup):
         description="Whether AI render is in progress",
         default=False,
     )
+    # Projection settings
+    input_source: EnumProperty(
+        name="Input Source",
+        description="What to capture and send to AI (only used when Projection Source = AI)",
+        items=[
+            ('COLOR', "Viewport Screenshot", "Capture current viewport color"),
+            ('DEPTH', "Depth Map", "Capture depth information"),
+        ],
+        default='COLOR'
+    )
     
-    # I projection settings
+    projection_source: EnumProperty(
+        name="Projection Source",
+        description="Where the projected texture comes from",
+        items=[
+            ('AI', "AI Generated", "Generate texture using AI from captured input"),
+            ('IMAGE', "Custom Texture", "Use a selected image directly"),
+            ('GRID', "Grid", "Use wireframe grid for alignment testing"),
+        ],
+        default='AI'
+    )
+    
+    projection_image: PointerProperty(
+        type=bpy.types.Image,
+        name="Projection Image",
+        description="Custom image to project onto the mesh"
+    )
+    
+    # Projection settings
     projection_bake: BoolProperty(
         name="Bake to UVs",
         description="Bake the projected texture back to the object's original UV layout",
         default=True,
     )
-    grid_simulation: BoolProperty(
-        name="Simulation Mode (Grid)",
-        description="Capture wireframe grid instead of color for alignment verification",
-        default=False,
-    )
     
-    # I mask Repair Mode settings
+    # Mask Repair Mode settings
     mask_repair_mode: BoolProperty(
         name="Mask Repair Mode",
         description="Use mask-based incremental texture repair - selected faces are masked and AI repairs only that region",
@@ -215,10 +237,10 @@ class GeminiRenderProperties(PropertyGroup):
         size=4,
         min=0.0,
         max=1.0,
-        default=(1.0, 0.0, 0.0, 1.0),  # Red, fully opaque
+        default=(1.0, 0.0, 0.0, 1.0),
     )
     
-    # I debug Mode
+    # Debug Mode
     debug_mode: BoolProperty(
         name="Debug Mode",
         description="Enable manual step-by-step debugging and export debug images to 'textures' folder",
@@ -228,23 +250,6 @@ class GeminiRenderProperties(PropertyGroup):
     debug_step: IntProperty(
         name="Debug Step",
         default=0
-    )
-    
-    projection_source: EnumProperty(
-        name="Projection Source",
-        description="Choose which image to send to AI or use directly for projection",
-        items=[
-            ('DEPTH', "Depth Map (Mist)", "Use pure depth information - best for structure"),
-            ('COLOR', "Viewport Color", "Use viewport colors - best for material preservation"),
-            ('IMAGE', "Custom Image", "Use a selected image from Blender data blocks"),
-        ],
-        default='COLOR'
-    )
-
-    projection_image: PointerProperty(
-        type=bpy.types.Image,
-        name="Projection Image",
-        description="Select an image from the Blender data blocks for projection"
     )
 
 class BANANA_PT_render_panel(Panel):
@@ -288,53 +293,7 @@ class BANANA_PT_render_panel(Panel):
             if not props.api_key.strip():
                 box.label(text="Enter API key", icon='ERROR')
         
-        # Prompt
-        box = layout.box()
-        box.label(text="Prompt", icon='TEXT')
-        box.prop(props, "prompt", text="")
-        
-        # Style Reference
-        box = layout.box()
-        row = box.row(align=True)
-        row.scale_y = 2.0
-        row.prop(props, "use_style_reference", text=" Style Reference", toggle=True)
-        
-        if props.use_style_reference:
-            col = box.column()
-            col.prop(props, "style_reference_image", text="Reference Image")
-            
-            # Load from file button
-            load_row = col.row()
-            load_row.scale_y = 1.5
-            load_row.operator("gemini.load_image_as_reference", text="Load Photo from Computer", icon='FILEBROWSER')
-            
-            if props.style_reference_image:
-                info_box = box.box()
-                info_box.scale_y = 0.6
-                info_box.label(text="AI will copy: materials, colors, lighting, textures")
-                info_box.label(text="AI will keep: depth map geometry (shapes & layout)")
-                info_box.label(text="Note: Material base colors are preserved from scene", icon='INFO')
-                
-                # I show image info
-                img_info = info_box.row(align=True)
-                img_info.label(text=f" {props.style_reference_image.size[0]}x{props.style_reference_image.size[1]}")
-                img_info.label(text=f"🎨 {props.style_reference_image.name}")
-            else:
-                help_box = box.box() 
-                help_box.scale_y = 0.7
-                help_box.label(text="📸 No reference image selected", icon='INFO')
-                help_box.label(text="Load external photos to copy their STYLE:")
-                help_box.label(text="✓ Colors, materials, lighting, textures")
-                help_box.label(text="✓ Depth map provides shapes & composition")
-                help_box.label(text="Examples: architectural photos, paintings, nature")
-        else:
-            help_box = box.box()
-            help_box.scale_y = 0.7
-            help_box.label(text="Enable to copy style from reference photos", icon='INFO')
-            help_box.label(text="AI will use only depth map + prompt without style reference")
-        
-        
-        # I settings toggle
+        # Settings toggle
         row = layout.row()
         row.prop(props, "show_settings", 
                 text="Settings" if not props.show_settings else "Hide Settings",
@@ -343,112 +302,76 @@ class BANANA_PT_render_panel(Panel):
         if props.show_settings:
             box = layout.box()
             
-            # I model selection removed from here
+            # Debug options
+            box.label(text="Debug:", icon='TOOL_SETTINGS')
+            box.prop(props, "debug_mode", text="Manual Debug Mode")
             
-            # I render Mode selection
-            box.label(text="Render Mode:", icon='RENDERLAYERS')
-            box.prop(props, "render_mode", text="")
-            
-            # I resolution selection
-            box.label(text="Resolution:", icon='FULLSCREEN_ENTER')
-            box.prop(props, "resolution", text="")
-            
-            # I show mist settings only if depth mode is selected
-            if props.render_mode == 'DEPTH':
-                box.separator()
-                box.label(text="Mist Pass Settings:", icon='WORLD')
-                box.prop(props, "mist_start")
-                box.prop(props, "mist_depth")
-                box.prop(props, "mist_falloff")
-                
-                # I preview mist button
-                row = box.row()
-                if props.mist_preview:
-                    row.prop(props, "mist_preview", text="Hide Mist Preview", toggle=True, icon='HIDE_OFF')
-                else:
-                    row.prop(props, "mist_preview", text="Show Mist Preview", toggle=True, icon='HIDE_ON')
-            else:
-                # I show info for regular render mode
-                info_box = box.box()
-                info_box.scale_y = 0.7
-                info_box.label(text="Regular Render will use:", icon='INFO')
-                info_box.label(text="  • Current scene textures")
-                info_box.label(text="  • Current lighting setup")
-                info_box.label(text="  • Scene colors")
-                info_box.label(text="Great for preserving existing look!")
-            
+            if props.debug_mode:
+                debug_box = box.box()
+                step_text = f"Next Debug Step ({props.debug_step})"
+                debug_box.operator("gemini.debug_next", text=step_text, icon='PLAY')
+                debug_box.label(text=f"Step {props.debug_step}: Check logs", icon='CONSOLE')
         
-        # I style Reference moved to settings
-        
-        # I main render button
-        layout.separator()
-        col = layout.column(align=True)
-        col.scale_y = 2.0  # I make it even bigger!
-        
-        if props.is_rendering:
-            col.enabled = False
-            col.operator("gemini.ai_render", text=" Rendering in Progress...", icon='RENDER_ANIMATION')
-        else:
-            render_text = "Generate AI Render"
-            if props.use_style_reference and props.style_reference_image:
-                render_text = "Generate AI Render with Style"
-            col.operator("gemini.ai_render", text=render_text, icon='RENDER_STILL')
-        
-        # I texture Projection Section
+        # Texture Projection Section
         layout.separator()
         box = layout.box()
         box.label(text="Texture Projection", icon='MOD_UVPROJECT')
         
+        # Projection Source (what to project)
+        proj_box = box.box()
+        proj_box.label(text="Projection Source:", icon='MOD_UVPROJECT')
+        proj_box.prop(props, "projection_source", text="")
+        
+        # Show options based on projection source
+        if props.projection_source == 'AI':
+            # AI Input type
+            input_row = proj_box.row()
+            input_row.label(text="Capture:")
+            input_row.prop(props, "input_source", text="")
+            
+            # Prompt
+            proj_box.label(text="Prompt:", icon='TEXT')
+            proj_box.prop(props, "prompt", text="")
+            
+            # Style Reference
+            style_row = proj_box.row()
+            style_row.prop(props, "use_style_reference", text="Use Style Reference")
+            if props.use_style_reference:
+                proj_box.prop(props, "style_reference_image", text="Reference")
+                load_row = proj_box.row()
+                load_row.operator("gemini.load_image_as_reference", text="Load Image", icon='FILEBROWSER')
+        elif props.projection_source == 'IMAGE':
+            proj_box.prop(props, "projection_image", text="Image")
+            if not props.projection_image:
+                proj_box.label(text="Select an image to project", icon='ERROR')
+        
+        # Main Project Button
         proj_col = box.column(align=True)
-        proj_col.scale_y = 1.5
+        proj_col.scale_y = 2.0
         
         if props.is_rendering:
             proj_col.enabled = False
-            proj_col.operator("gemini.texture_projection", text="Processing Projection...", icon='RENDER_ANIMATION')
+            proj_col.operator("gemini.texture_projection", text="Processing...", icon='RENDER_ANIMATION')
         else:
-            proj_col.operator("gemini.texture_projection", text="AI Texture Projection", icon='MOD_UVPROJECT')
+            btn_text = "Project Texture"
+            if props.projection_source == 'AI':
+                btn_text = "AI Texture Projection"
+            elif props.projection_source == 'GRID':
+                btn_text = "Grid Projection (Test)"
+            proj_col.operator("gemini.texture_projection", text=btn_text, icon='MOD_UVPROJECT')
         
+        # Options
         row = box.row()
-        row.prop(props, "projection_bake", text="Bake Result to Original UVs")
+        row.prop(props, "projection_bake", text="Bake to Original UVs")
         
-        row = box.row()
-        row.label(text="AI Source:", icon='IMAGE_DATA')
-        row.prop(props, "projection_source", text="")
-        
-        if props.projection_source == 'IMAGE':
-            img_row = box.row()
-            img_row.prop(props, "projection_image", text="Source Image")
-            if not props.projection_image:
-                box.label(text="Please select an image", icon='ERROR')
-        
-        row = box.row()
-        row.prop(props, "grid_simulation", text="Simulation Mode (Grid)")
-        
-        # I mask Repair Mode
+        # Mask Repair Mode
         row = box.row()
         row.prop(props, "mask_repair_mode", text="Mask Repair Mode")
         if props.mask_repair_mode:
             color_row = box.row()
             color_row.prop(props, "mask_color", text="Mask Color")
-            info_box = box.box()
-            info_box.scale_y = 0.7
-            info_box.label(text="Mask mode: AI repairs only the masked region", icon='INFO')
-            info_box.label(text="Incremental bake back to original texture")
         
-        if props.projection_bake:
-            box.label(text="AI will bake the projection back to the object's texture", icon='INFO')
-
-        # I debug Mode Controls (User Request)
-        layout.separator()
-        box_debug = layout.box()
-        box_debug.prop(props, "debug_mode", text="Start Manual Debug Mode")
-        
-        if props.debug_mode:
-            step_text = f"Next Debug Step ({props.debug_step})"
-            box_debug.operator("gemini.debug_next", text=step_text, icon='PLAY')
-            box_debug.label(text=f"Step {props.debug_step}: Check Console for logs", icon='CONSOLE')
-        
-        # I validation feedback
+        # Validation feedback
         obj = context.active_object
         if not obj or obj.type != 'MESH':
             box.label(text="Select a mesh object", icon='ERROR')
@@ -457,30 +380,17 @@ class BANANA_PT_render_panel(Panel):
         else:
              box.label(text="Select faces to project onto", icon='FACESEL')
         
-        # I status and utilities
-        layout.separator()
-        
         # Status
+        layout.separator()
         box = layout.box()
         status_icon = 'INFO' if not props.is_rendering else 'TIME'
         box.label(text=props.status_text, icon=status_icon)
         
-        # I stop button if rendering
+        # Stop button if rendering
         if props.is_rendering:
             row = layout.row()
             row.scale_y = 1.2
-            row.operator("gemini.stop_render", text="Stop Render", icon='CANCEL')
-            
-        
-        # I quick help
-        if not props.api_key.strip():
-            box = layout.box()
-            box.label(text="Quick Start:", icon='HELP')
-            col = box.column(align=True)
-            col.label(text="1. Get API key from Google AI Studio")
-            col.label(text="2. Enter it above")  
-            col.label(text="3. Add objects and camera")
-            col.label(text="4. Click AI Render!")
+            row.operator("gemini.stop_render", text="Stop", icon='CANCEL')
 
 
 class BANANA_PT_history_panel(Panel):

@@ -351,6 +351,8 @@ class GEMINI_OT_texture_projection(Operator):
     bl_description = "Capture viewport, project to mesh, and generate texture using AI"
     bl_options = {'REGISTER', 'UNDO'}
 
+    bypass_ai: bpy.props.BoolProperty(default=False)
+    
     current_thread = None
 
     @classmethod
@@ -544,15 +546,17 @@ class GEMINI_OT_texture_projection(Operator):
                 return {'CANCELLED'}
 
         # 2. Logic Branching based on Projection Source
+        # Determine which image to project
         if props.projection_source == 'IMAGE':
             source_image_override = props.projection_image
             if not source_image_override:
-                self.report({'ERROR'}, "No image selected for projection")
+                self.report({'ERROR'}, "No projection image selected")
                 return {'CANCELLED'}
             
-            source_path = "" # I not used for 'IMAGE'
+            source_path = ""
             sim_path = ""
-            print(f"🖼 Direct Image Mode active: Using '{source_image_override.name}'")
+            bypass_api = True
+            print(f"🖼 Projection: Custom Image '{source_image_override.name}'")
         else:
             source_image_override = None
             # I temporary directory for workspace
@@ -586,24 +590,31 @@ class GEMINI_OT_texture_projection(Operator):
                 source_filename = "captured_source.png"
                 source_path = os.path.join(temp_dir, source_filename)
                 
-                if props.projection_source == 'COLOR':
-                    print("🎨 Capturing Color Viewport (Intended AI Source)")
+                if props.input_source == 'COLOR':
+                    print("🎨 Capturing Color Viewport (Input Source)")
                     success = capture_viewport_to_file(self, context, scene, props, space_data, region, v_width, v_height, temp_dir, source_filename)
                 else: # DEPTH
-                    print(" Capturing Depth Map (Intended AI Source)")
+                    print(" Capturing Depth Map (Input Source)")
                     success = capture_viewport_to_file(self, context, scene, props, space_data, region, v_width, v_height, temp_dir, source_filename, is_depth=True)
 
                 if not success:
                     raise Exception("Primary viewport capture failed")
 
-                # 2. Capture SIMULATION GRID if needed
+                # 2. Handle Projection Source
                 sim_path = ""
-                if props.grid_simulation:
+                bypass_api = (props.projection_source != 'AI')
+                
+                if props.projection_source == 'GRID':
+                    # GRID: Capture wireframe
                     sim_filename = "grid_simulation.png"
                     sim_path = os.path.join(temp_dir, sim_filename)
-                    print("⚒ Capturing Wireframe Grid (Simulation Output)")
+                    print("⚒ Capturing Wireframe Grid (Projection: Grid)")
                     if not capture_viewport_to_file(self, context, scene, props, space_data, region, v_width, v_height, temp_dir, sim_filename, show_wireframe=True):
-                        raise Exception("Grid simulation capture failed")
+                        raise Exception("Grid capture failed")
+                elif props.projection_source == 'IMAGE':
+                    # Custom projection image - handled above
+                    pass
+                # AI projection handled in thread
 
                 # E. Local Debug Output Setup
                 if props.debug_mode:
@@ -849,9 +860,9 @@ class GEMINI_OT_texture_projection(Operator):
             image_node_name=image_node.name,
             material_name=material.name,
             do_bake=props.projection_bake,
-            bypass_api=props.grid_simulation,
+            bypass_api=bypass_api,
             mask_repair_data=mask_repair_data,
-            projection_source=props.projection_source,
+            input_source=props.input_source,
             debug_mode=props.debug_mode,
             source_image_override=source_image_override,
             cam_data=cam_data
@@ -860,6 +871,7 @@ class GEMINI_OT_texture_projection(Operator):
         
         self.report({'INFO'}, f"AI Projection started for {processed_count} objects...")
         return {'FINISHED'}
+
 
 
 class GEMINI_OT_stop_render(Operator):

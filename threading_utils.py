@@ -772,7 +772,7 @@ class FullRenderThread(threading.Thread):
 class ProjectionRenderThread(threading.Thread):
     """Background thread for AI Texture Projection pipeline"""
     
-    def __init__(self, context, api_client, user_prompt, source_path, sim_path, target_objects_data, image_node_name, material_name, do_bake, bypass_api=False, mask_repair_data=None, projection_source='DEPTH', debug_mode=False, source_image_override=None, cam_data=None):
+    def __init__(self, context, api_client, user_prompt, source_path, sim_path, target_objects_data, image_node_name, material_name, do_bake, bypass_api=False, mask_repair_data=None, input_source='COLOR', debug_mode=False, source_image_override=None, cam_data=None):
         super().__init__(daemon=True)
         self.scene = context.scene
         self.api_client = api_client
@@ -784,13 +784,13 @@ class ProjectionRenderThread(threading.Thread):
         self.material_name = material_name
         self.do_bake = do_bake
         self.bypass_api = bypass_api
-        self.mask_repair_data = mask_repair_data  # I contains temp objects, materials, original textures
-        self.projection_source = projection_source
+        self.mask_repair_data = mask_repair_data
+        self.input_source = input_source
         self.debug_mode = debug_mode
-        self.source_image_override = source_image_override # I blender Image object
+        self.source_image_override = source_image_override
         self.cam_data = cam_data
         self._stop_event = threading.Event()
-        print(f"[GEMINI) ProjectionRenderThread initialized (mask_repair={mask_repair_data is not None}, source={projection_source}, override={source_image_override is not None})")
+        print(f"[GEMINI] ProjectionRenderThread initialized (bypass_api={bypass_api}, input={input_source})")
     
     def stop(self):
         self._stop_event.set()
@@ -835,10 +835,10 @@ class ProjectionRenderThread(threading.Thread):
                     image_data = f.read()
                 mime_type = "image/png"
             else:
-                print(f" Calling AI to generate texture (Source: {self.projection_source})...")
+                print(f" Calling AI to generate texture (Input: {self.input_source})...")
                 
-                # I in Phase 5, source_path is always the selected AI source
-                is_color = (self.projection_source == 'COLOR')
+                # Determine if input is color (for AI API)
+                is_color = (self.input_source == 'COLOR')
                 
                 # I send ONLY ONE image to API - 1:1 Mapping
                 image_data, mime_type = self.api_client.generate_image(
