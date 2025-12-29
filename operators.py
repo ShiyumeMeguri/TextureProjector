@@ -139,6 +139,50 @@ class GEMINI_OT_ai_render(Operator):
 
 # Note: _validate_projection and bake_projection moved to projection_utils.py
 
+def capture_viewport_to_file(operator, context, scene, props, space_data, region, v_width, v_height, temp_dir, filename, show_wireframe=False, is_depth=False):
+    """Refactored helper for clean viewport capture"""
+    target_path = os.path.join(temp_dir, filename)
+    original_shading_type = space_data.shading.type
+    
+    try:
+        if is_depth:
+            # Depth capture logic
+            depth_renderer = depth_utils.DepthRenderer()
+            has_camera = scene.camera is not None
+            
+            if has_camera:
+                raw_depth_path = depth_renderer.render_depth_map_mist(scene, props.mist_start, props.mist_depth, props.mist_falloff)
+            else:
+                raw_depth_path = depth_renderer.render_depth_viewport(context, width=v_width, height=v_height)
+            
+            if raw_depth_path and os.path.exists(raw_depth_path):
+                shutil.copy2(raw_depth_path, target_path)
+                return True
+            return False
+        else:
+            # Regular Viewport Capture (Color or Wireframe)
+            if show_wireframe:
+                space_data.shading.type = 'WIREFRAME'
+            else:
+                # For Viewport Color mode, we want TEXTURE rendering
+                if props.projection_source == 'COLOR':
+                    space_data.shading.type = 'RENDERED'
+                else:
+                    space_data.shading.type = 'SOLID'
+            
+            scene.render.filepath = target_path
+            bpy.ops.render.opengl(write_still=True, view_context=True)
+            
+            # Restore state
+            space_data.shading.type = original_shading_type
+            return True
+            
+    except Exception as e:
+        print(f"❌ [GEMINI] Capture helper failed: {e}")
+        if 'original_shading_type' in locals():
+            space_data.shading.type = original_shading_type
+        return False
+
 class GEMINI_OT_texture_projection(Operator):
     """Deeply integrated AI Texture Projection"""
     bl_idname = "gemini.texture_projection"
@@ -200,9 +244,7 @@ class GEMINI_OT_texture_projection(Operator):
         
         # Temporary directory for workspace
         temp_dir = tempfile.mkdtemp(prefix="gemini_proj_")
-        init_img_path = os.path.join(temp_dir, "init.png")
-        depth_path = os.path.join(temp_dir, "depth_raw.png")
-        sim_path = os.path.join(temp_dir, "sim_grid.png")
+        source_path = os.path.join(temp_dir, "captured_input.png")
 
         # Configure for capture
         space_data.overlay.show_overlays = False
@@ -333,50 +375,48 @@ class GEMINI_OT_texture_projection(Operator):
             # A. Capture Color (Native Resolution)
             print(f"[GEMINI] Capturing viewport color ({v_width}x{v_height})...")
             props.status_text = "📸 Capturing viewport..."
-            scene.render.filepath = init_img_path
-            bpy.ops.render.opengl(write_still=True, view_context=True)
             
-            # B. Grid Simulation Capture
+            # D. Determine Capture Requirements & Execute
+            # Anti-redundancy with meaningful debug: 
+            # 1. Capture the INTENDED AI SOURCE
+            source_filename = "captured_source.png"
+            source_path = os.path.join(temp_dir, source_filename)
+            
+            if props.projection_source == 'COLOR':
+                print("🎨 [GEMINI] Capturing Color Viewport (Intended AI Source)")
+                success = capture_viewport_to_file(self, context, scene, props, space_data, region, v_width, v_height, temp_dir, source_filename)
+            else: # DEPTH
+                print("📏 [GEMINI] Capturing Depth Map (Intended AI Source)")
+                success = capture_viewport_to_file(self, context, scene, props, space_data, region, v_width, v_height, temp_dir, source_filename, is_depth=True)
+
+            if not success:
+                raise Exception("Primary viewport capture failed")
+
+            # 2. Capture SIMULATION GRID if needed
+            sim_path = ""
             if props.grid_simulation:
-                print("[GEMINI] Capturing grid simulation (WIREFRAME toggle)...")
-                space_data.shading.type = 'WIREFRAME'
-                scene.render.filepath = sim_path
-                bpy.ops.render.opengl(write_still=True, view_context=True)
-                space_data.shading.type = original_shading_type
+                sim_filename = "grid_simulation.png"
+                sim_path = os.path.join(temp_dir, sim_filename)
+                print("⚒️ [GEMINI] Capturing Wireframe Grid (Simulation Output)")
+                if not capture_viewport_to_file(self, context, scene, props, space_data, region, v_width, v_height, temp_dir, sim_filename, show_wireframe=True):
+                    raise Exception("Grid simulation capture failed")
 
-            # C. Capture Depth (Native Resolution)
-            print("[GEMINI] Capturing viewport depth...")
-            depth_renderer = depth_utils.DepthRenderer()
-            has_camera = scene.camera is not None
-            
-            if has_camera:
-                raw_depth_path = depth_renderer.render_depth_map_mist(scene, props.mist_start, props.mist_depth, props.mist_falloff)
-            else:
-                raw_depth_path = depth_renderer.render_depth_viewport(context, width=v_width, height=v_height)
-            
-            shutil.copy2(raw_depth_path, depth_path)
-
-            # E. Local Debug Localization (Relative to .blend)
+            # E. Local Debug Output Setup
             if props.debug_mode:
                 blend_path = bpy.data.filepath
                 base_debug_dir = os.path.join(os.path.dirname(blend_path), "textures") if blend_path else os.path.join(temp_dir, "textures")
                 if not os.path.exists(base_debug_dir): os.makedirs(base_debug_dir)
                 
-                input_color_path = os.path.join(base_debug_dir, "input_viewport_color.png")
-                input_depth_path = os.path.join(base_debug_dir, "input_viewport_depth.png")
-                shutil.copy2(init_img_path, input_color_path)
-                shutil.copy2(depth_path, input_depth_path)
-                
-                if props.grid_simulation:
-                    sim_output_path = os.path.join(base_debug_dir, "simulated_output_grid.png")
-                    shutil.copy2(sim_path, sim_output_path)
-                    print(f"🐞 [GEMINI] Simulated grid output saved to: {sim_output_path}")
-                
-                print(f"🐞 [GEMINI] Debug images saved to: {base_debug_dir}")
+                # SAVE INTENDED AI INPUT
+                shutil.copy2(source_path, os.path.join(base_debug_dir, "input.png"))
+                print(f"🐞 [GEMINI] Debug input (AI Intention) saved: {os.path.join(base_debug_dir, 'input.png')}")
 
         except Exception as capture_error:
             print(f"💥 [GEMINI] Capture Error: {capture_error}")
-            raise capture_error
+            import traceback
+            traceback.print_exc()
+            self.report({'ERROR'}, f"Capture failed: {str(capture_error)}")
+            return {'CANCELLED'}
 
         finally:
             # Restore Viewport Settings
@@ -434,11 +474,8 @@ class GEMINI_OT_texture_projection(Operator):
         import bmesh
         from bpy_extras import view3d_utils, object_utils
 
-        if props.grid_simulation:
-            init_img_path = sim_path
-
-        # Process ALL selected mesh objects
         processed_count = 0
+        has_camera = scene.camera is not None
         for obj in context.selected_objects:
             if obj.type != 'MESH': continue
             
@@ -588,20 +625,21 @@ class GEMINI_OT_texture_projection(Operator):
         api_key = props.api_key.strip() or gemini_api.get_api_key()
         api_client = gemini_api.GeminiAPI(api_key, model_name=props.model_name)
         
-        print(f"🧵 [GEMINI] Starting Projection Thread for {processed_count} objects...")
+        print(f"🧵 [GEMINI] Starting Projection Thread (Accurate Sim Debug) for {processed_count} objects...")
         self.current_thread = threading_utils.ProjectionRenderThread(
             context=context,
             api_client=api_client,
             user_prompt=props.prompt,
-            depth_path=depth_path,
-            init_image_path=init_img_path,
+            source_path=source_path, # Intended AI Source
+            sim_path=sim_path,       # Local grid simulation (if any)
             target_objects_data=target_objects_data,
             image_node_name=image_node.name,
             material_name=material.name,
             do_bake=props.projection_bake,
             bypass_api=props.grid_simulation,
             mask_repair_data=mask_repair_data,
-            projection_source=props.projection_source
+            projection_source=props.projection_source,
+            debug_mode=props.debug_mode
         )
         self.current_thread.start()
         

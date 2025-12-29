@@ -756,13 +756,13 @@ class FullRenderThread(threading.Thread):
 class ProjectionRenderThread(threading.Thread):
     """Background thread for AI Texture Projection pipeline"""
     
-    def __init__(self, context, api_client, user_prompt, depth_path, init_image_path, target_objects_data, image_node_name, material_name, do_bake, bypass_api=False, mask_repair_data=None, projection_source='DEPTH'):
+    def __init__(self, context, api_client, user_prompt, source_path, sim_path, target_objects_data, image_node_name, material_name, do_bake, bypass_api=False, mask_repair_data=None, projection_source='DEPTH', debug_mode=False):
         super().__init__(daemon=True)
         self.scene = context.scene
         self.api_client = api_client
         self.user_prompt = user_prompt
-        self.depth_path = depth_path
-        self.init_image_path = init_image_path
+        self.source_path = source_path
+        self.sim_path = sim_path
         self.target_objects_data = target_objects_data
         self.image_node_name = image_node_name
         self.material_name = material_name
@@ -770,70 +770,73 @@ class ProjectionRenderThread(threading.Thread):
         self.bypass_api = bypass_api
         self.mask_repair_data = mask_repair_data  # Contains temp objects, materials, original textures
         self.projection_source = projection_source
+        self.debug_mode = debug_mode
         self._stop_event = threading.Event()
-        print(f"[GEMINI] ProjectionRenderThread initialized (mask_repair={mask_repair_data is not None}, source={projection_source})")
+        print(f"[GEMINI] ProjectionRenderThread initialized (mask_repair={mask_repair_data is not None}, source={projection_source}, sim={'ON' if bypass_api else 'OFF'})")
     
     def stop(self):
         self._stop_event.set()
-    
+        
     def run(self):
         print("[GEMINI] ProjectionRenderThread starting...")
         try:
             update_render_status(self.scene, "Sending projection to Gemini...", True)
             
-            # 1. Call API with depth + init_image (color capture)
-            # The Gemini API needs to be told this is a projection task
-            # We'll use the depth as control and init_image as the base
-            
-            # Since GeminiAPI.generate_image takes depth_path and reference_path,
-            # we'll use init_image as reference_path but maybe with a custom prompt.
-            
-            # Wait, does generate_image support init_image?
-            # nano-banana-render's gemini_api.py:
-            # def generate_image(self, depth_image_path: str, user_prompt: str, reference_image_path: str = None, ...)
-            
-            # I should probably check gemini_api.py if it supports img2img or just depth-to-img.
-            # Viewing gemini_api.py again to be sure.
-            
             from . import operators # Local import to avoid circularity
             
-            # For now, let's assume we use the regular generate_image
-            # In Dream Textures, they used a "projection" prompt prefix.
             projection_prompt = f"Project this into a texture: {self.user_prompt}"
             
-            # Resolution - use viewport size or 1024
+            # Resolution
             props = self.scene.gemini_render
             resolution = int(props.resolution)
             
+            # DEBUG: Save exact intended AI input
+            if self.debug_mode:
+                try:
+                    import shutil
+                    blend_path = bpy.data.filepath
+                    base_debug_dir = os.path.join(os.path.dirname(blend_path), "textures") if blend_path else os.path.join(tempfile.gettempdir(), "textures")
+                    if os.path.exists(base_debug_dir):
+                        shutil.copy2(self.source_path, os.path.join(base_debug_dir, "input.png"))
+                        print(f"🐞 [GEMINI] Debug input confirmed at: {base_debug_dir}")
+                except Exception as de:
+                    print(f"⚠️ [GEMINI] Debug input sync failed: {de}")
+
             if self.bypass_api:
-                print("🛡️ [GEMINI] Simulation Mode: Bypassing AI call, using local grid simulation...")
-                with open(self.init_image_path, 'rb') as f:
+                print("🛡️ [GEMINI] Simulation Mode: Bypassing AI call, using local grid capture...")
+                # In simulation mode, use the grid capture from sim_path
+                with open(self.sim_path, 'rb') as f:
                     image_data = f.read()
                 mime_type = "image/png"
             else:
                 print(f"🚀 [GEMINI] Calling AI to generate texture (Source: {self.projection_source})...")
                 
-                # Determine which images to send based on source selection
-                if self.projection_source == 'COLOR':
-                    # Use Color Viewport as primary structure, Depth Map as style/guide
-                    main_path = self.init_image_path
-                    ref_path = self.depth_path
-                    is_color = True
-                else:
-                    # Use Depth Map as primary structure, Color Viewport as style/guide
-                    main_path = self.depth_path
-                    ref_path = self.init_image_path
-                    is_color = False
+                # In Phase 5, source_path is always the selected AI source
+                is_color = (self.projection_source == 'COLOR')
                 
+                # Send ONLY ONE image to API - 1:1 Mapping
                 image_data, mime_type = self.api_client.generate_image(
-                    depth_image_path=main_path,
+                    depth_image_path=self.source_path,
                     user_prompt=projection_prompt,
-                    reference_image_path=ref_path,
+                    reference_image_path=None, 
                     is_color_render=is_color,
                     width=resolution,
                     height=resolution
                 )
             
+            # DEBUG: Save final output (AI or simulated)
+            if self.debug_mode:
+                try:
+                    blend_path = bpy.data.filepath
+                    base_debug_dir = os.path.join(os.path.dirname(blend_path), "textures") if blend_path else os.path.join(tempfile.gettempdir(), "textures")
+                    if os.path.exists(base_debug_dir):
+                        res_path = os.path.join(base_debug_dir, "output.png")
+                        with open(res_path, 'wb') as f:
+                            f.write(image_data)
+                        print(f"🐞 [GEMINI] Debug output saved to: {res_path}")
+                except Exception as de:
+                    print(f"⚠️ [GEMINI] Debug result save failed: {de}")
+
             if self._stop_event.is_set():
                 return
                 
