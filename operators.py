@@ -268,7 +268,9 @@ def capture_viewport_to_file(operator, context, scene, props, space_data, region
     """
     target_path = os.path.join(temp_dir, filename)
     original_shading_type = space_data.shading.type
-    has_camera = scene.camera is not None
+    rv3d = context.region_data
+    is_camera_view = (rv3d.view_perspective == 'CAMERA') if rv3d else False
+    has_camera = scene.camera is not None and is_camera_view
     
     try:
         if is_depth:
@@ -410,8 +412,10 @@ class GEMINI_OT_texture_projection(Operator):
         # CAMERA PRIORITY: If camera exists, use camera render + camera resolution
         # This ensures pixel-perfect UV alignment (world_to_camera_view matches render)
         # ======================================================================
-        has_camera = scene.camera is not None
-        use_camera_render = has_camera  # Use camera render when camera exists
+        rv3d = context.region_data
+        is_camera_view = (rv3d.view_perspective == 'CAMERA') if rv3d else False
+        has_camera = scene.camera is not None and is_camera_view
+        use_camera_render = has_camera  # Use camera render when camera view is active
         
         if use_camera_render:
             # ======================================================================

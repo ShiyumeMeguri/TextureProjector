@@ -482,7 +482,9 @@ class FullRenderThread(threading.Thread):
             render_mode = props.render_mode if props and hasattr(props, 'render_mode') else 'DEPTH'
             
             # Check for camera to determine if we need viewport fallback
-            has_camera = self.scene.camera is not None
+            # ONLY use camera if it exists AND the view was in camera mode
+            is_camera_view = self.cam_data.get('is_camera_view', False) if self.cam_data else False
+            has_camera = self.scene.camera is not None and is_camera_view
             
             # Execute render based on mode
             render_result = None
