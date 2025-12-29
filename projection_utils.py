@@ -50,6 +50,8 @@ def bake(context, obj, texture_node_name, target_image, src_uv_name="Projected U
     original_active = context.view_layer.objects.active
     original_mode = obj.mode
     original_hide_render = obj.hide_render # Phase 6
+    original_dither = scene.render.dither_intensity
+    original_view_transform = scene.view_settings.view_transform
     
     # Ensure we are in OBJECT mode for baking
     if obj.mode != 'EDIT':
@@ -72,6 +74,10 @@ def bake(context, obj, texture_node_name, target_image, src_uv_name="Projected U
         scene.cycles.samples = 1
         scene.cycles.use_adaptive_sampling = False
         scene.cycles.use_denoising = False
+        
+        # QUALITY OPTIMIZATION: Disable dither and force Standard view transform
+        scene.render.dither_intensity = 0.0
+        scene.view_settings.view_transform = 'Standard'
         
         # 2. Prepare selection
         for o in context.view_layer.objects:
@@ -193,4 +199,8 @@ def bake(context, obj, texture_node_name, target_image, src_uv_name="Projected U
         
         # Phase 6 Restore: Render Visibility
         obj.hide_render = original_hide_render
+        
+        # Quality Restore
+        scene.render.dither_intensity = original_dither
+        scene.view_settings.view_transform = original_view_transform
 
