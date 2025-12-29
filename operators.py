@@ -357,19 +357,22 @@ class GEMINI_OT_texture_projection(Operator):
             shutil.copy2(raw_depth_path, depth_path)
 
             # E. Local Debug Localization (Relative to .blend)
-            blend_path = bpy.data.filepath
-            base_debug_dir = os.path.join(os.path.dirname(blend_path), "textures") if blend_path else os.path.join(temp_dir, "textures")
-            if not os.path.exists(base_debug_dir): os.makedirs(base_debug_dir)
-            
-            input_color_path = os.path.join(base_debug_dir, "input_viewport_color.png")
-            input_depth_path = os.path.join(base_debug_dir, "input_viewport_depth.png")
-            shutil.copy2(init_img_path, input_color_path)
-            shutil.copy2(depth_path, input_depth_path)
-            
-            if props.grid_simulation:
-                sim_output_path = os.path.join(base_debug_dir, "simulated_output_grid.png")
-                shutil.copy2(sim_path, sim_output_path)
-                print(f"🐞 [GEMINI] Simulated grid output saved to: {sim_output_path}")
+            if props.debug_mode:
+                blend_path = bpy.data.filepath
+                base_debug_dir = os.path.join(os.path.dirname(blend_path), "textures") if blend_path else os.path.join(temp_dir, "textures")
+                if not os.path.exists(base_debug_dir): os.makedirs(base_debug_dir)
+                
+                input_color_path = os.path.join(base_debug_dir, "input_viewport_color.png")
+                input_depth_path = os.path.join(base_debug_dir, "input_viewport_depth.png")
+                shutil.copy2(init_img_path, input_color_path)
+                shutil.copy2(depth_path, input_depth_path)
+                
+                if props.grid_simulation:
+                    sim_output_path = os.path.join(base_debug_dir, "simulated_output_grid.png")
+                    shutil.copy2(sim_path, sim_output_path)
+                    print(f"🐞 [GEMINI] Simulated grid output saved to: {sim_output_path}")
+                
+                print(f"🐞 [GEMINI] Debug images saved to: {base_debug_dir}")
 
         except Exception as capture_error:
             print(f"💥 [GEMINI] Capture Error: {capture_error}")
@@ -597,7 +600,8 @@ class GEMINI_OT_texture_projection(Operator):
             material_name=material.name,
             do_bake=props.projection_bake,
             bypass_api=props.grid_simulation,
-            mask_repair_data=mask_repair_data
+            mask_repair_data=mask_repair_data,
+            projection_source=props.projection_source
         )
         self.current_thread.start()
         

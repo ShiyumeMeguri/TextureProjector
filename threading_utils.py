@@ -756,7 +756,7 @@ class FullRenderThread(threading.Thread):
 class ProjectionRenderThread(threading.Thread):
     """Background thread for AI Texture Projection pipeline"""
     
-    def __init__(self, context, api_client, user_prompt, depth_path, init_image_path, target_objects_data, image_node_name, material_name, do_bake, bypass_api=False, mask_repair_data=None):
+    def __init__(self, context, api_client, user_prompt, depth_path, init_image_path, target_objects_data, image_node_name, material_name, do_bake, bypass_api=False, mask_repair_data=None, projection_source='DEPTH'):
         super().__init__(daemon=True)
         self.scene = context.scene
         self.api_client = api_client
@@ -769,8 +769,9 @@ class ProjectionRenderThread(threading.Thread):
         self.do_bake = do_bake
         self.bypass_api = bypass_api
         self.mask_repair_data = mask_repair_data  # Contains temp objects, materials, original textures
+        self.projection_source = projection_source
         self._stop_event = threading.Event()
-        print(f"[GEMINI] ProjectionRenderThread initialized (mask_repair={mask_repair_data is not None})")
+        print(f"[GEMINI] ProjectionRenderThread initialized (mask_repair={mask_repair_data is not None}, source={projection_source})")
     
     def stop(self):
         self._stop_event.set()
@@ -810,12 +811,25 @@ class ProjectionRenderThread(threading.Thread):
                     image_data = f.read()
                 mime_type = "image/png"
             else:
-                print(f"🚀 [GEMINI] Calling AI to generate texture...")
+                print(f"🚀 [GEMINI] Calling AI to generate texture (Source: {self.projection_source})...")
+                
+                # Determine which images to send based on source selection
+                if self.projection_source == 'COLOR':
+                    # Use Color Viewport as primary structure, Depth Map as style/guide
+                    main_path = self.init_image_path
+                    ref_path = self.depth_path
+                    is_color = True
+                else:
+                    # Use Depth Map as primary structure, Color Viewport as style/guide
+                    main_path = self.depth_path
+                    ref_path = self.init_image_path
+                    is_color = False
+                
                 image_data, mime_type = self.api_client.generate_image(
-                    depth_image_path=self.depth_path,
+                    depth_image_path=main_path,
                     user_prompt=projection_prompt,
-                    reference_image_path=self.init_image_path,
-                    is_color_render=True,
+                    reference_image_path=ref_path,
+                    is_color_render=is_color,
                     width=resolution,
                     height=resolution
                 )

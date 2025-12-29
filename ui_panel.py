@@ -224,13 +224,23 @@ class GeminiRenderProperties(PropertyGroup):
     # Debug Mode
     debug_mode: BoolProperty(
         name="Debug Mode",
-        description="Enable manual step-by-step debugging",
+        description="Enable manual step-by-step debugging and export debug images to 'textures' folder",
         default=False
     )
     
     debug_step: IntProperty(
         name="Debug Step",
         default=0
+    )
+    
+    projection_source: EnumProperty(
+        name="Projection Source",
+        description="Choose which image to send to Gemini as the primary structure reference",
+        items=[
+            ('DEPTH', "Depth Map (Mist)", "Use pure depth information - best for structure"),
+            ('COLOR', "Viewport Color", "Use viewport colors - best for material preservation"),
+        ],
+        default='COLOR'
     )
 
 class BANANA_PT_render_panel(Panel):
@@ -399,6 +409,11 @@ class BANANA_PT_render_panel(Panel):
         
         row = box.row()
         row.prop(props, "projection_bake", text="Bake Result to Original UVs")
+        
+        row = box.row()
+        row.label(text="AI Source:", icon='IMAGE_DATA')
+        row.prop(props, "projection_source", text="")
+        
         row = box.row()
         row.prop(props, "grid_simulation", text="Simulation Mode (Grid)")
         
