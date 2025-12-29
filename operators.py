@@ -33,6 +33,71 @@ _debug_storage = {
 }
 # =====================
 
+# =====================
+
+def get_current_view_state(context):
+    """Capture current viewport or camera state for restoration"""
+    view_state = {}
+    try:
+        scene = context.scene
+        # 1. Check if we are in camera view
+        rv3d = context.region_data
+        if rv3d:
+            view_state['location'] = rv3d.view_location.copy()
+            view_state['rotation'] = rv3d.view_rotation.copy()
+            view_state['view_distance'] = rv3d.view_distance
+            view_state['is_camera_view'] = (rv3d.view_perspective == 'CAMERA')
+            
+            # If camera view, store lens
+            if scene.camera:
+                view_state['lens'] = scene.camera.data.lens
+            else:
+                # If viewport, use viewport lens
+                for area in context.screen.areas:
+                    if area.type == 'VIEW_3D':
+                        for space in area.spaces:
+                            if space.type == 'VIEW_3D':
+                                view_state['lens'] = space.lens
+                                break
+        
+        print(f"📷 [GEMINI] View state captured: CamView={view_state.get('is_camera_view')}")
+    except Exception as e:
+        print(f"⚠️ [GEMINI] Failed to capture view state: {e}")
+    return view_state
+
+def restore_view_state(context, history_item):
+    """Restore viewport/camera state from history item"""
+    try:
+        # Find 3D View area
+        for area in context.screen.areas:
+            if area.type == 'VIEW_3D':
+                for space in area.spaces:
+                    if space.type == 'VIEW_3D':
+                        rv3d = space.region_3d
+                        if rv3d:
+                            # Restore common properties
+                            rv3d.view_location = history_item.cam_location
+                            rv3d.view_rotation = history_item.cam_rotation
+                            rv3d.view_distance = history_item.view_distance
+                            
+                            # Restore perspective
+                            if history_item.is_camera_view:
+                                rv3d.view_perspective = 'CAMERA'
+                            else:
+                                rv3d.view_perspective = 'PERSP'
+                            
+                            # Restore lens
+                            space.lens = history_item.cam_lens
+                            
+                            # Flash redraw
+                            area.tag_redraw()
+                            print(f"✅ [GEMINI] View state restored from history")
+                            return True
+        return False
+    except Exception as e:
+        print(f"⚠️ [GEMINI] Failed to restore view state: {e}")
+        return False
+
 class GEMINI_OT_ai_render(Operator):
     """AI Render operator - main functionality"""
     bl_idname = "gemini.ai_render"
@@ -91,12 +156,16 @@ class GEMINI_OT_ai_render(Operator):
             
             print("🧵 [GEMINI] Starting full background thread...")
             
+            # Capture current view state
+            cam_data = get_current_view_state(context)
+            
             # Back to full background thread but with proper context override
             self.current_thread = threading_utils.FullRenderThread(
                 context=context,  # Pass full context
                 depth_renderer=depth_renderer,
                 api_client=api_client,
-                user_prompt=props.prompt
+                user_prompt=props.prompt,
+                cam_data=cam_data
             )
             
             self.current_thread.start()
@@ -242,193 +311,206 @@ class GEMINI_OT_texture_projection(Operator):
         original_res_y = scene.render.resolution_y
         original_res_pct = scene.render.resolution_percentage
         
-        # Temporary directory for workspace
-        temp_dir = tempfile.mkdtemp(prefix="gemini_proj_")
-        source_path = os.path.join(temp_dir, "captured_input.png")
+        # 2. Logic Branching based on Projection Source
+        if props.projection_source == 'IMAGE':
+            source_image_override = props.projection_image
+            if not source_image_override:
+                self.report({'ERROR'}, "No image selected for projection")
+                return {'CANCELLED'}
+            
+            source_path = "" # Not used for 'IMAGE'
+            sim_path = ""
+            mask_repair_data = None # Direct image mode doesn't support mask repair for now
+            print(f"🖼️ [GEMINI] Direct Image Mode active: Using '{source_image_override.name}'")
+        else:
+            source_image_override = None
+            # Temporary directory for workspace
+            temp_dir = tempfile.mkdtemp(prefix="gemini_proj_")
+            source_path = os.path.join(temp_dir, "captured_input.png")
 
-        # Configure for capture
-        space_data.overlay.show_overlays = False
-        scene.render.image_settings.file_format = 'PNG'
-        
-        # Force render resolution to match viewport for viewport renders
-        scene.render.resolution_x = v_width
-        scene.render.resolution_y = v_height
-        scene.render.resolution_percentage = 100
-        
-        # Mask Repair Mode: Create temp mask mesh WITHOUT affecting original object state
-        mask_repair_data = None
-        if props.mask_repair_mode:
-            try:
-                print("[GEMINI] Mask Repair Mode: Creating mask overlay mesh...")
-                
-                # Get the active object (must be in Edit Mode)
-                obj = context.active_object
-                if not obj or obj.type != 'MESH' or obj.mode != 'EDIT':
-                    raise Exception("Active object must be a mesh in Edit Mode")
-                
-                obj_name = obj.name
-                print(f"[GEMINI] Mask Repair Mode: Active object = '{obj_name}'")
-                
-                # Get bmesh from edit mesh
-                bm = bmesh.from_edit_mesh(obj.data)
-                
-                # Count and identify selected faces
-                selected_faces = [f for f in bm.faces if f.select]
-                print(f"[GEMINI] Mask Repair Mode: {len(selected_faces)} faces selected")
-                
-                if not selected_faces:
-                    raise Exception("No faces selected")
-                
-                # FACE-AWARE TEXTURE TARGETING: Use material of first selected face
-                target_mat_index = selected_faces[0].material_index
-                original_texture = None
-                
-                if target_mat_index < len(obj.material_slots):
-                    slot = obj.material_slots[target_mat_index]
-                    if slot.material and slot.material.use_nodes:
-                        for node in slot.material.node_tree.nodes:
-                            if node.type == 'TEX_IMAGE' and node.image:
-                                original_texture = node.image
-                                break
-                
-                # Fallback to search ALL slots if not found in target slot (unlikely but safe)
-                if not original_texture:
-                    print("⚠️ [GEMINI] Targeted slot has no image, searching all slots...")
-                    for slot in obj.material_slots:
+            # Configure for capture
+            space_data.overlay.show_overlays = False
+            scene.render.image_settings.file_format = 'PNG'
+            
+            # Force render resolution to match viewport for viewport renders
+            scene.render.resolution_x = v_width
+            scene.render.resolution_y = v_height
+            scene.render.resolution_percentage = 100
+            
+            # Mask Repair Mode: Create temp mask mesh WITHOUT affecting original object state
+            mask_repair_data = None
+            if props.mask_repair_mode:
+                try:
+                    print("[GEMINI] Mask Repair Mode: Creating mask overlay mesh...")
+                    
+                    # Get the active object (must be in Edit Mode)
+                    obj = context.active_object
+                    if not obj or obj.type != 'MESH' or obj.mode != 'EDIT':
+                        raise Exception("Active object must be a mesh in Edit Mode")
+                    
+                    obj_name = obj.name
+                    print(f"[GEMINI] Mask Repair Mode: Active object = '{obj_name}'")
+                    
+                    # Get bmesh from edit mesh
+                    bm = bmesh.from_edit_mesh(obj.data)
+                    
+                    # Count and identify selected faces
+                    selected_faces = [f for f in bm.faces if f.select]
+                    print(f"[GEMINI] Mask Repair Mode: {len(selected_faces)} faces selected")
+                    
+                    if not selected_faces:
+                        raise Exception("No faces selected")
+                    
+                    # FACE-AWARE TEXTURE TARGETING: Use material of first selected face
+                    target_mat_index = selected_faces[0].material_index
+                    original_texture = None
+                    
+                    if target_mat_index < len(obj.material_slots):
+                        slot = obj.material_slots[target_mat_index]
                         if slot.material and slot.material.use_nodes:
                             for node in slot.material.node_tree.nodes:
                                 if node.type == 'TEX_IMAGE' and node.image:
                                     original_texture = node.image
                                     break
-                        if original_texture: break
+                    
+                    # Fallback to search ALL slots if not found in target slot (unlikely but safe)
+                    if not original_texture:
+                        print("⚠️ [GEMINI] Targeted slot has no image, searching all slots...")
+                        for slot in obj.material_slots:
+                            if slot.material and slot.material.use_nodes:
+                                for node in slot.material.node_tree.nodes:
+                                    if node.type == 'TEX_IMAGE' and node.image:
+                                        original_texture = node.image
+                                        break
+                            if original_texture: break
+                    
+                    if not selected_faces:
+                        raise Exception("No faces selected")
+                    
+                    # Create a COPY for temp mesh (does not affect original)
+                    bm_copy = bm.copy()
+                    
+                    # Delete unselected faces from the copy
+                    faces_to_delete = [f for f in bm_copy.faces if not f.select]
+                    bmesh.ops.delete(bm_copy, geom=faces_to_delete, context='FACES')
+                    
+                    # Create new mesh data from the copy
+                    temp_mesh = bpy.data.meshes.new(f"{obj_name}_MaskTemp_Data")
+                    bm_copy.to_mesh(temp_mesh)
+                    bm_copy.free()
+                    
+                    # Create temp object
+                    temp_obj = bpy.data.objects.new(f"{obj_name}_MaskTemp", temp_mesh)
+                    temp_obj.matrix_world = obj.matrix_world.copy()
+                    
+                    # Link to scene
+                    context.collection.objects.link(temp_obj)
+                    
+                    # Create mask material
+                    mask_mat_name = "Gemini_Mask_Material_Temp"
+                    mask_mat = bpy.data.materials.get(mask_mat_name)
+                    if mask_mat:
+                        bpy.data.materials.remove(mask_mat)
+                    mask_mat = bpy.data.materials.new(name=mask_mat_name)
+                    mask_mat.use_nodes = True
+                    mask_nodes = mask_mat.node_tree.nodes
+                    mask_links = mask_mat.node_tree.links
+                    mask_nodes.clear()
+                    
+                    mask_output = mask_nodes.new("ShaderNodeOutputMaterial")
+                    mask_output.location = (300, 0)
+                    mask_emit = mask_nodes.new("ShaderNodeEmission")
+                    mask_emit.location = (100, 0)
+                    mask_emit.inputs['Color'].default_value = (props.mask_color[0], props.mask_color[1], props.mask_color[2], 1.0)
+                    mask_emit.inputs['Strength'].default_value = 1.0
+                    mask_links.new(mask_emit.outputs['Emission'], mask_output.inputs['Surface'])
+                    
+                    # Assign material to temp mesh
+                    temp_obj.data.materials.clear()
+                    temp_obj.data.materials.append(mask_mat)
+                    
+                    # Store mask repair data
+                    mask_repair_data = {
+                        'temp_objects': [temp_obj.name],
+                        'temp_materials': [mask_mat_name],
+                        'original_textures': {obj_name: original_texture.name},
+                        'original_object_names': [obj_name],
+                    }
+                    
+                    print(f"[GEMINI] Mask Repair Mode: Created temp mesh '{temp_obj.name}' with mask material")
+                    print("[GEMINI] Mask Repair Mode: Original object state UNCHANGED")
+                    
+                except Exception as mask_error:
+                    print(f"❌ [GEMINI] Mask Repair Mode setup error: {mask_error}")
+                    import traceback
+                    traceback.print_exc()
+                    # CRITICAL CHANGE: Abort immediately to prevent falling back to Standard Mode (which would destroy the texture)
+                    self.report({'ERROR'}, f"Mask Repair Setup Failed: {mask_error}. Aborting to protect texture.")
+                    return {'CANCELLED'}
+            
+            # PRE-FLIGHT CHECK
+            if props.mask_repair_mode and not mask_repair_data:
+                 self.report({'ERROR'}, "Mask Repair Mode active but no mask data generated. Aborting.")
+                 return {'CANCELLED'}
+
+            try:
+                # A. Capture Color (Native Resolution)
+                print(f"[GEMINI] Capturing viewport color ({v_width}x{v_height})...")
+                props.status_text = "📸 Capturing viewport..."
                 
-                if not selected_faces:
-                    raise Exception("No faces selected")
+                # D. Determine Capture Requirements & Execute
+                # Anti-redundancy with meaningful debug: 
+                # 1. Capture the INTENDED AI SOURCE
+                source_filename = "captured_source.png"
+                source_path = os.path.join(temp_dir, source_filename)
                 
-                # Create a COPY for temp mesh (does not affect original)
-                bm_copy = bm.copy()
-                
-                # Delete unselected faces from the copy
-                faces_to_delete = [f for f in bm_copy.faces if not f.select]
-                bmesh.ops.delete(bm_copy, geom=faces_to_delete, context='FACES')
-                
-                # Create new mesh data from the copy
-                temp_mesh = bpy.data.meshes.new(f"{obj_name}_MaskTemp_Data")
-                bm_copy.to_mesh(temp_mesh)
-                bm_copy.free()
-                
-                # Create temp object
-                temp_obj = bpy.data.objects.new(f"{obj_name}_MaskTemp", temp_mesh)
-                temp_obj.matrix_world = obj.matrix_world.copy()
-                
-                # Link to scene
-                context.collection.objects.link(temp_obj)
-                
-                # Create mask material
-                mask_mat_name = "Gemini_Mask_Material_Temp"
-                mask_mat = bpy.data.materials.get(mask_mat_name)
-                if mask_mat:
-                    bpy.data.materials.remove(mask_mat)
-                mask_mat = bpy.data.materials.new(name=mask_mat_name)
-                mask_mat.use_nodes = True
-                mask_nodes = mask_mat.node_tree.nodes
-                mask_links = mask_mat.node_tree.links
-                mask_nodes.clear()
-                
-                mask_output = mask_nodes.new("ShaderNodeOutputMaterial")
-                mask_output.location = (300, 0)
-                mask_emit = mask_nodes.new("ShaderNodeEmission")
-                mask_emit.location = (100, 0)
-                mask_emit.inputs['Color'].default_value = (props.mask_color[0], props.mask_color[1], props.mask_color[2], 1.0)
-                mask_emit.inputs['Strength'].default_value = 1.0
-                mask_links.new(mask_emit.outputs['Emission'], mask_output.inputs['Surface'])
-                
-                # Assign material to temp mesh
-                temp_obj.data.materials.clear()
-                temp_obj.data.materials.append(mask_mat)
-                
-                # Store mask repair data
-                mask_repair_data = {
-                    'temp_objects': [temp_obj.name],
-                    'temp_materials': [mask_mat_name],
-                    'original_textures': {obj_name: original_texture.name},
-                    'original_object_names': [obj_name],
-                }
-                
-                print(f"[GEMINI] Mask Repair Mode: Created temp mesh '{temp_obj.name}' with mask material")
-                print("[GEMINI] Mask Repair Mode: Original object state UNCHANGED")
-                
-            except Exception as mask_error:
-                print(f"❌ [GEMINI] Mask Repair Mode setup error: {mask_error}")
+                if props.projection_source == 'COLOR':
+                    print("🎨 [GEMINI] Capturing Color Viewport (Intended AI Source)")
+                    success = capture_viewport_to_file(self, context, scene, props, space_data, region, v_width, v_height, temp_dir, source_filename)
+                else: # DEPTH
+                    print("📏 [GEMINI] Capturing Depth Map (Intended AI Source)")
+                    success = capture_viewport_to_file(self, context, scene, props, space_data, region, v_width, v_height, temp_dir, source_filename, is_depth=True)
+
+                if not success:
+                    raise Exception("Primary viewport capture failed")
+
+                # 2. Capture SIMULATION GRID if needed
+                sim_path = ""
+                if props.grid_simulation:
+                    sim_filename = "grid_simulation.png"
+                    sim_path = os.path.join(temp_dir, sim_filename)
+                    print("⚒️ [GEMINI] Capturing Wireframe Grid (Simulation Output)")
+                    if not capture_viewport_to_file(self, context, scene, props, space_data, region, v_width, v_height, temp_dir, sim_filename, show_wireframe=True):
+                        raise Exception("Grid simulation capture failed")
+
+                # E. Local Debug Output Setup
+                if props.debug_mode:
+                    blend_path = bpy.data.filepath
+                    base_debug_dir = os.path.join(os.path.dirname(blend_path), "textures") if blend_path else os.path.join(temp_dir, "textures")
+                    if not os.path.exists(base_debug_dir): os.makedirs(base_debug_dir)
+                    
+                    # SAVE INTENDED AI INPUT
+                    shutil.copy2(source_path, os.path.join(base_debug_dir, "input.png"))
+                    print(f"🐞 [GEMINI] Debug input (AI Intention) saved: {os.path.join(base_debug_dir, 'input.png')}")
+
+            except Exception as capture_error:
+                print(f"💥 [GEMINI] Capture Error: {capture_error}")
                 import traceback
                 traceback.print_exc()
-                # CRITICAL CHANGE: Abort immediately to prevent falling back to Standard Mode (which would destroy the texture)
-                self.report({'ERROR'}, f"Mask Repair Setup Failed: {mask_error}. Aborting to protect texture.")
+                self.report({'ERROR'}, f"Capture failed: {str(capture_error)}")
                 return {'CANCELLED'}
-        
-        # PRE-FLIGHT CHECK
-        if props.mask_repair_mode and not mask_repair_data:
-             self.report({'ERROR'}, "Mask Repair Mode active but no mask data generated. Aborting.")
-             return {'CANCELLED'}
 
-        try:
-            # A. Capture Color (Native Resolution)
-            print(f"[GEMINI] Capturing viewport color ({v_width}x{v_height})...")
-            props.status_text = "📸 Capturing viewport..."
-            
-            # D. Determine Capture Requirements & Execute
-            # Anti-redundancy with meaningful debug: 
-            # 1. Capture the INTENDED AI SOURCE
-            source_filename = "captured_source.png"
-            source_path = os.path.join(temp_dir, source_filename)
-            
-            if props.projection_source == 'COLOR':
-                print("🎨 [GEMINI] Capturing Color Viewport (Intended AI Source)")
-                success = capture_viewport_to_file(self, context, scene, props, space_data, region, v_width, v_height, temp_dir, source_filename)
-            else: # DEPTH
-                print("📏 [GEMINI] Capturing Depth Map (Intended AI Source)")
-                success = capture_viewport_to_file(self, context, scene, props, space_data, region, v_width, v_height, temp_dir, source_filename, is_depth=True)
-
-            if not success:
-                raise Exception("Primary viewport capture failed")
-
-            # 2. Capture SIMULATION GRID if needed
-            sim_path = ""
-            if props.grid_simulation:
-                sim_filename = "grid_simulation.png"
-                sim_path = os.path.join(temp_dir, sim_filename)
-                print("⚒️ [GEMINI] Capturing Wireframe Grid (Simulation Output)")
-                if not capture_viewport_to_file(self, context, scene, props, space_data, region, v_width, v_height, temp_dir, sim_filename, show_wireframe=True):
-                    raise Exception("Grid simulation capture failed")
-
-            # E. Local Debug Output Setup
-            if props.debug_mode:
-                blend_path = bpy.data.filepath
-                base_debug_dir = os.path.join(os.path.dirname(blend_path), "textures") if blend_path else os.path.join(temp_dir, "textures")
-                if not os.path.exists(base_debug_dir): os.makedirs(base_debug_dir)
+            finally:
+                # Restore Viewport Settings
+                scene.render.filepath = render_filepath
+                scene.render.image_settings.file_format = render_format
+                space_data.overlay.show_overlays = original_show_overlays
+                space_data.shading.type = original_shading_type
                 
-                # SAVE INTENDED AI INPUT
-                shutil.copy2(source_path, os.path.join(base_debug_dir, "input.png"))
-                print(f"🐞 [GEMINI] Debug input (AI Intention) saved: {os.path.join(base_debug_dir, 'input.png')}")
-
-        except Exception as capture_error:
-            print(f"💥 [GEMINI] Capture Error: {capture_error}")
-            import traceback
-            traceback.print_exc()
-            self.report({'ERROR'}, f"Capture failed: {str(capture_error)}")
-            return {'CANCELLED'}
-
-        finally:
-            # Restore Viewport Settings
-            scene.render.filepath = render_filepath
-            scene.render.image_settings.file_format = render_format
-            space_data.overlay.show_overlays = original_show_overlays
-            space_data.shading.type = original_shading_type
-            
-            # Restore resolution
-            scene.render.resolution_x = original_res_x
-            scene.render.resolution_y = original_res_y
-            scene.render.resolution_percentage = original_res_pct
+                # Restore resolution
+                scene.render.resolution_x = original_res_x
+                scene.render.resolution_y = original_res_y
+                scene.render.resolution_percentage = original_res_pct
 
         # 3. Setup Projection Logic (Remapping UVs)
         target_objects_data = []
@@ -621,6 +703,9 @@ class GEMINI_OT_texture_projection(Operator):
             self.report({'WARNING'}, "No faces were projected. Ensure meshes are in Edit Mode with faces selected.")
             return {'CANCELLED'}
 
+        # Capture current view state
+        cam_data = get_current_view_state(context)
+
         # 4. Start AI Thread
         api_key = props.api_key.strip() or gemini_api.get_api_key()
         api_client = gemini_api.GeminiAPI(api_key, model_name=props.model_name)
@@ -639,7 +724,9 @@ class GEMINI_OT_texture_projection(Operator):
             bypass_api=props.grid_simulation,
             mask_repair_data=mask_repair_data,
             projection_source=props.projection_source,
-            debug_mode=props.debug_mode
+            debug_mode=props.debug_mode,
+            source_image_override=source_image_override,
+            cam_data=cam_data
         )
         self.current_thread.start()
         
@@ -900,6 +987,23 @@ class GEMINI_OT_load_history(Operator):
             self.report({'ERROR'}, f"Failed to load history: {str(e)}")
             return {'CANCELLED'}
 
+class GEMINI_OT_open_history_image(Operator):
+    """Open history image in a new window for viewing"""
+    bl_idname = "gemini.open_history_image"
+    bl_label = "View History Photo"
+    bl_description = "Open this render result in the image editor"
+    bl_options = {'REGISTER'}
+
+    history_index: IntProperty(
+        name="History Index",
+        description="Index of history item to view",
+        default=0
+    )
+
+    def execute(self, context):
+        # reuse logic from load_history but focused on just opening the image
+        op = bpy.ops.gemini.load_history(history_index=self.history_index)
+        return {'FINISHED'}
 
 class GEMINI_OT_delete_history(Operator):
     """Delete render from history"""
@@ -1069,21 +1173,22 @@ class GEMINI_OT_history_context_menu(Operator):
             prompt_op = layout.operator("gemini.use_history_prompt", text="Use Prompt", icon='TEXT')
             prompt_op.history_index = history_idx
             
-            # Use style only (if available)
+            # Use style options if available
             if item.style_reference_used:
                 style_op = layout.operator("gemini.use_history_style", text="Use Style", icon='IMAGE_DATA')  
                 style_op.history_index = history_idx
                 
-                # Use both
                 both_op = layout.operator("gemini.use_history_both", text="Use Both", icon='GHOST_ENABLED')
                 both_op.history_index = history_idx
-            else:
-                # No style info
-                layout.label(text="🚫 No style used", icon='INFO')
             
+            # Use as Projection Source
+            layout.separator()
+            set_source_op = layout.operator("gemini.set_projection_source", text="Use as Projection Source", icon='ADD')
+            set_source_op.history_index = history_idx
+
             # Delete action
             layout.separator()
-            delete_op = layout.operator("gemini.delete_history", text="Delete", icon='X')
+            delete_op = layout.operator("gemini.delete_history", text="Delete Item", icon='X')
             delete_op.history_index = history_idx
 
         # Store history index in context for menu
@@ -1149,126 +1254,36 @@ class GEMINI_OT_use_history_both(Operator):
             return {'CANCELLED'}
 
 
-class GEMINI_OT_open_history_image(Operator):
-    """Open history image in full size"""
-    bl_idname = "gemini.open_history_image"
-    bl_label = "Open History Image"
-    bl_description = "Open history image in full size view"
-    bl_options = {'REGISTER'}
-
-    history_index: IntProperty(
-        name="History Index",
-        description="Index of history item to open image from",
-        default=0
-    )
-
+class GEMINI_OT_set_projection_source(Operator):
+    """Set projection source to this image"""
+    bl_idname = "gemini.set_projection_source"
+    bl_label = "Use as Projection Source"
+    bl_description = "Set this image as the direct source for projection"
+    bl_options = {'REGISTER', 'UNDO'}
+    
+    history_index: IntProperty(name="History Index")
+    
     def execute(self, context):
-        try:
-            props = context.scene.gemini_render
-            
-            print(f"🖼️ [GEMINI] GEMINI_OT_open_history_image called with index: {self.history_index}")
-            
-            if self.history_index < 0 or self.history_index >= len(props.render_history):
-                print(f"💥 [GEMINI] Invalid history index: {self.history_index}, history length: {len(props.render_history)}")
-                self.report({'ERROR'}, "Invalid history index")
-                return {'CANCELLED'}
-            
-            history_item = props.render_history[self.history_index]
-            print(f"🖼️ [GEMINI] History item: {history_item.prompt[:30]}...")
-            
-            # Get the main AI_Result image directly (no thumbnails)
-            image_to_open = None
-            
-            print(f"🖼️ [GEMINI] Looking for main image: {history_item.image_name}")
-            
-            # Try main image (AI_Result_*)
-            if history_item.image_name and history_item.image_name in bpy.data.images:
-                try:
-                    candidate = bpy.data.images[history_item.image_name]
-                    print(f"🖼️ [GEMINI] Found AI_Result image: {candidate.name}, has_data: {candidate.has_data}")
-                    if candidate.has_data:  # Check if image has valid data
-                        image_to_open = candidate
-                        print(f"✅ [GEMINI] Using AI_Result image: {image_to_open.name}")
-                    else:
-                        print(f"⚠️ [GEMINI] AI_Result image has no data: {candidate.name}")
-                except Exception as e:
-                    print(f"⚠️ [GEMINI] Error checking AI_Result image: {e}")
-                    pass
-            
-            if not image_to_open:
-                print(f"💥 [GEMINI] AI_Result image not found or has no data for history index {self.history_index}")
-                self.report({'ERROR'}, "AI Result image not found or has no valid data")
-                return {'CANCELLED'}
-            
-            # Use the original AI_Result image directly - no duplication needed
-            print(f"🖼️ [GEMINI] Using original AI_Result image directly: {image_to_open.name}")
-            duplicate_image = image_to_open  # Use original, don't create copy
-            
-            # Try to open in new window or existing Image Editor
-            print(f"🖼️ [GEMINI] Attempting to display AI_Result in Image Editor...")
-            
-            try:
-                # Method 1: Create new window with Image Editor
-                print(f"🖼️ [GEMINI] Method 1: Creating new window...")
-                bpy.ops.wm.window_new()
-                new_window = bpy.context.window_manager.windows[-1]
-                print(f"🖼️ [GEMINI] New window created, searching for areas...")
-                
-                for area in new_window.screen.areas:
-                    print(f"🖼️ [GEMINI] Found area type: {area.type}")
-                    if area.type != 'IMAGE_EDITOR':
-                        area.type = 'IMAGE_EDITOR'
-                        print(f"🖼️ [GEMINI] Converted area to IMAGE_EDITOR")
-                        for space in area.spaces:
-                            if space.type == 'IMAGE_EDITOR':
-                                space.image = duplicate_image
-                                area.tag_redraw()
-                                print(f"✅ [GEMINI] SUCCESS: Opened AI_Result in new window: {duplicate_image.name}")
-                                print(f"🖼️ [GEMINI] Image Editor now shows: {space.image.name if space.image else 'None'}")
-                                self.report({'INFO'}, f"Opened: {duplicate_image.name}")
-                                return {'FINISHED'}
-                        break
-                
-            except Exception as e:
-                print(f"⚠️ [GEMINI] Could not create new window: {e}")
-                
-                # Method 2: Find existing Image Editor
-                print(f"🖼️ [GEMINI] Method 2: Looking for existing Image Editor...")
-                for area in bpy.context.screen.areas:
-                    if area.type == 'IMAGE_EDITOR':
-                        print(f"🖼️ [GEMINI] Found existing Image Editor")
-                        for space in area.spaces:
-                            if space.type == 'IMAGE_EDITOR':
-                                space.image = duplicate_image
-                                area.tag_redraw()
-                                print(f"✅ [GEMINI] SUCCESS: Set AI_Result in existing Image Editor: {duplicate_image.name}")
-                                print(f"🖼️ [GEMINI] Image Editor now shows: {space.image.name if space.image else 'None'}")
-                                self.report({'INFO'}, f"Opened: {duplicate_image.name}")
-                                return {'FINISHED'}
-                
-                # Method 3: Convert safe area to Image Editor
-                print(f"🖼️ [GEMINI] Method 3: Converting safe area to Image Editor...")
-                SAFE_AREAS = ['TEXT_EDITOR', 'CONSOLE', 'INFO', 'FILE_BROWSER']
-                for area in bpy.context.screen.areas:
-                    if area.type in SAFE_AREAS:
-                        print(f"🖼️ [GEMINI] Found safe area: {area.type}")
-                        area.type = 'IMAGE_EDITOR'
-                        for space in area.spaces:
-                            if space.type == 'IMAGE_EDITOR':
-                                space.image = duplicate_image
-                                area.tag_redraw()
-                                print(f"✅ [GEMINI] SUCCESS: Converted area to show AI_Result: {duplicate_image.name}")
-                                print(f"🖼️ [GEMINI] Image Editor now shows: {space.image.name if space.image else 'None'}")
-                                self.report({'INFO'}, f"Opened: {duplicate_image.name}")
-                                return {'FINISHED'}
-                
-                print(f"💥 [GEMINI] FAILED: Could not find suitable area to display image")
-                self.report({'WARNING'}, "Could not find suitable area to display image")
-                return {'CANCELLED'}
-                
-        except Exception as e:
-            self.report({'ERROR'}, f"Failed to open image: {str(e)}")
+        props = context.scene.gemini_render
+        if self.history_index < 0 or self.history_index >= len(props.render_history):
+            self.report({'ERROR'}, "Invalid history index")
             return {'CANCELLED'}
+            
+        item = props.render_history[self.history_index]
+        image = bpy.data.images.get(item.image_name)
+        
+        if not image:
+            self.report({'ERROR'}, f"Image '{item.image_name}' not found in Blender")
+            return {'CANCELLED'}
+            
+        props.projection_source = 'IMAGE'
+        props.projection_image = image
+        
+        # RESTORE CAMERA ANGLE
+        restore_view_state(context, item)
+        
+        self.report({'INFO'}, f"Source set to: {item.image_name} (Angle Restored)")
+        return {'FINISHED'}
 
 
 class GEMINI_OT_load_image_as_reference(Operator, ImportHelper):

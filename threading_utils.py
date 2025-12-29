@@ -234,12 +234,12 @@ def save_reference_image_temp(scene) -> str:
         print(f"[GEMINI] Error saving reference image: {e}")
         return None
 
-def load_result_image(image_data: bytes, image_name: str = "AI_Result", user_prompt: str = "") -> None:
+def load_result_image(image_data: bytes, image_name: str = "AI_Result", user_prompt: str = "", cam_data: dict = None) -> None:
     """Load result image into Blender and save to history (thread-safe)"""
     print(f"🚀 [GEMINI] load_result_image wrapper called for {image_name}")
-    execute_in_main_thread(_load_result_image_sync, image_data, image_name, user_prompt)
+    execute_in_main_thread(_load_result_image_sync, image_data, image_name, user_prompt, cam_data)
 
-def _load_result_image_sync(image_data: bytes, image_name: str = "AI_Result", user_prompt: str = "") -> Any:
+def _load_result_image_sync(image_data: bytes, image_name: str = "AI_Result", user_prompt: str = "", cam_data: dict = None) -> Any:
     """Synchronous version of image loading. MUST be called from the main thread.
     Returns the loaded Image object (either the history one or the Render Result copy)."""
     print(f"📥 [GEMINI] _load_result_image_sync starting for {image_name}")
@@ -300,6 +300,18 @@ def _load_result_image_sync(image_data: bytes, image_name: str = "AI_Result", us
                         item.style_reference_used = True
                         item.style_reference_name = props.style_reference_image.name
                     
+                    # Store Camera Data if available
+                    if cam_data:
+                        try:
+                            item.cam_location = cam_data.get('location', (0,0,0))
+                            item.cam_rotation = cam_data.get('rotation', (1,0,0,0))
+                            item.cam_lens = cam_data.get('lens', 50.0)
+                            item.view_distance = cam_data.get('view_distance', 10.0)
+                            item.is_camera_view = cam_data.get('is_camera_view', False)
+                            print(f"📷 [GEMINI] Camera data stored in history item")
+                        except Exception as ce:
+                            print(f"⚠️ [GEMINI] Failed to store camera data: {ce}")
+                    
                     # Cleanup old history
                     while len(props.render_history) > 10:
                         oldest = props.render_history[0]
@@ -345,12 +357,13 @@ class RenderThread(threading.Thread):
 class APIThread(threading.Thread):
     """Background thread for API calls only (render happens in main thread)"""
     
-    def __init__(self, scene, api_client, user_prompt: str, depth_path: str):
+    def __init__(self, scene, api_client, user_prompt: str, depth_path: str, cam_data: dict = None):
         super().__init__(daemon=True)
         self.scene = scene
         self.api_client = api_client
         self.user_prompt = user_prompt
         self.depth_path = depth_path
+        self.cam_data = cam_data
         self._stop_event = threading.Event()
         print("[GEMINI] APIThread initialized")
     
@@ -400,7 +413,7 @@ class APIThread(threading.Thread):
             print("[GEMINI] Step 2: Loading result into Blender...")
             update_render_status(self.scene, "📥 Loading result...", True)
             print(f"[GEMINI] About to call load_result_image with user_prompt: '{self.user_prompt}' (length: {len(self.user_prompt) if self.user_prompt else 0})")
-            load_result_image(image_data, "Gemini_AI_Result", self.user_prompt)
+            load_result_image(image_data, "Gemini_AI_Result", self.user_prompt, self.cam_data)
             
             # Success
             print("🎉 [GEMINI] AI render completed successfully!")
@@ -430,7 +443,7 @@ class APIThread(threading.Thread):
 class FullRenderThread(threading.Thread):
     """Background thread for full render pipeline with proper context handling"""
     
-    def __init__(self, context, depth_renderer, api_client, user_prompt: str):
+    def __init__(self, context, depth_renderer, api_client, user_prompt: str, cam_data: dict = None):
         super().__init__(daemon=True)
         # Store only what we need from context
         self.scene = context.scene
@@ -442,6 +455,7 @@ class FullRenderThread(threading.Thread):
         self.depth_renderer = depth_renderer
         self.api_client = api_client
         self.user_prompt = user_prompt
+        self.cam_data = cam_data
         self._stop_event = threading.Event()
         print("[GEMINI] FullRenderThread initialized")
     
@@ -640,7 +654,7 @@ class FullRenderThread(threading.Thread):
             print("[GEMINI] Step 3: Loading result into Blender...")
             update_render_status(self.scene, "📥 Loading result...", True)
             print(f"[GEMINI] About to call load_result_image with user_prompt: '{self.user_prompt}' (length: {len(self.user_prompt) if self.user_prompt else 0})")
-            load_result_image(image_data, "Gemini_AI_Result", self.user_prompt)
+            load_result_image(image_data, "Gemini_AI_Result", self.user_prompt, self.cam_data)
             
             # Success
             print("🎉 [GEMINI] AI render completed successfully!")
@@ -756,7 +770,7 @@ class FullRenderThread(threading.Thread):
 class ProjectionRenderThread(threading.Thread):
     """Background thread for AI Texture Projection pipeline"""
     
-    def __init__(self, context, api_client, user_prompt, source_path, sim_path, target_objects_data, image_node_name, material_name, do_bake, bypass_api=False, mask_repair_data=None, projection_source='DEPTH', debug_mode=False):
+    def __init__(self, context, api_client, user_prompt, source_path, sim_path, target_objects_data, image_node_name, material_name, do_bake, bypass_api=False, mask_repair_data=None, projection_source='DEPTH', debug_mode=False, source_image_override=None, cam_data=None):
         super().__init__(daemon=True)
         self.scene = context.scene
         self.api_client = api_client
@@ -771,8 +785,10 @@ class ProjectionRenderThread(threading.Thread):
         self.mask_repair_data = mask_repair_data  # Contains temp objects, materials, original textures
         self.projection_source = projection_source
         self.debug_mode = debug_mode
+        self.source_image_override = source_image_override # Blender Image object
+        self.cam_data = cam_data
         self._stop_event = threading.Event()
-        print(f"[GEMINI] ProjectionRenderThread initialized (mask_repair={mask_repair_data is not None}, source={projection_source}, sim={'ON' if bypass_api else 'OFF'})")
+        print(f"[GEMINI) ProjectionRenderThread initialized (mask_repair={mask_repair_data is not None}, source={projection_source}, override={source_image_override is not None})")
     
     def stop(self):
         self._stop_event.set()
@@ -802,7 +818,15 @@ class ProjectionRenderThread(threading.Thread):
                 except Exception as de:
                     print(f"⚠️ [GEMINI] Debug input sync failed: {de}")
 
-            if self.bypass_api:
+            if self.source_image_override:
+                print(f"🖼️ [GEMINI] Direct Image Mode: Using '{self.source_image_override.name}' directly...")
+                # We need the image data as bytes for the internal loading logic
+                # However, the internal loading logic _load_result_image_sync expects bytes.
+                # If we already have the image in Blender, we can just use it.
+                # Let's adjust the _apply_result logic to handle an existing image.
+                image_data = None 
+                mime_type = "image/png" # Dummy
+            elif self.bypass_api:
                 print("🛡️ [GEMINI] Simulation Mode: Bypassing AI call, using local grid capture...")
                 # In simulation mode, use the grid capture from sim_path
                 with open(self.sim_path, 'rb') as f:
@@ -850,12 +874,14 @@ class ProjectionRenderThread(threading.Thread):
                     import tempfile
                     
                     # 1. Integrate with Render Gallery
-                    # 1. Integrate with Render Gallery (Synchronous)
-                    # We call the sync version to get the Image object IMMEDIATELY
-                    res_img = _load_result_image_sync(image_data, "Gemini_Projection_Result", self.user_prompt)
+                    if self.source_image_override:
+                        res_img = self.source_image_override
+                    else:
+                        # Synchronous version to get the Image object IMMEDIATELY
+                        res_img = _load_result_image_sync(image_data, "Gemini_Projection_Result", self.user_prompt, self.cam_data)
                     
                     if not res_img:
-                         print("❌ [GEMINI] Failed to load projection result image")
+                         print("❌ [GEMINI] Failed to load/retrieve projection result image")
                          return
 
                     # Update base material for preview

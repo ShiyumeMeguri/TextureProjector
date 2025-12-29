@@ -94,6 +94,7 @@ core_classes = (
     operators.GEMINI_OT_use_history_both,
     operators.GEMINI_OT_history_context_menu,
     operators.GEMINI_OT_open_history_image,
+    operators.GEMINI_OT_set_projection_source,
     operators.GEMINI_OT_load_image_as_reference,
     operators.GEMINI_OT_load_example_reference,
     operators.GEMINI_OT_texture_projection,

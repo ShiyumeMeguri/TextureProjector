@@ -48,6 +48,13 @@ class GeminiRenderHistoryItem(PropertyGroup):
         description="Name of style reference thumbnail in bpy.data.images",
         default=""
     )
+    
+    # Camera/Viewport restoration data
+    cam_location: FloatVectorProperty(name="Camera Location", size=3)
+    cam_rotation: FloatVectorProperty(name="Camera Rotation", size=4, subtype='QUATERNION', default=(1, 0, 0, 0))
+    cam_lens: FloatProperty(name="Camera Lens", default=50.0)
+    view_distance: FloatProperty(name="View Distance", default=10.0)
+    is_camera_view: BoolProperty(name="Is Camera View", default=False)
 
 class GeminiRenderProperties(PropertyGroup):
     """Properties for Gemini Render addon stored in scene"""
@@ -235,12 +242,19 @@ class GeminiRenderProperties(PropertyGroup):
     
     projection_source: EnumProperty(
         name="Projection Source",
-        description="Choose which image to send to Gemini as the primary structure reference",
+        description="Choose which image to send to Gemini or use directly for projection",
         items=[
             ('DEPTH', "Depth Map (Mist)", "Use pure depth information - best for structure"),
             ('COLOR', "Viewport Color", "Use viewport colors - best for material preservation"),
+            ('IMAGE', "Custom Image", "Use a selected image from Blender data blocks"),
         ],
         default='COLOR'
+    )
+
+    projection_image: PointerProperty(
+        type=bpy.types.Image,
+        name="Projection Image",
+        description="Select an image from the Blender data blocks for projection"
     )
 
 class BANANA_PT_render_panel(Panel):
@@ -413,6 +427,12 @@ class BANANA_PT_render_panel(Panel):
         row = box.row()
         row.label(text="AI Source:", icon='IMAGE_DATA')
         row.prop(props, "projection_source", text="")
+        
+        if props.projection_source == 'IMAGE':
+            img_row = box.row()
+            img_row.prop(props, "projection_image", text="Source Image")
+            if not props.projection_image:
+                box.label(text="Please select an image", icon='ERROR')
         
         row = box.row()
         row.prop(props, "grid_simulation", text="Simulation Mode (Grid)")
