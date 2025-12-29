@@ -49,6 +49,7 @@ def bake(context, obj, texture_node_name, target_image, src_uv_name="Projected U
     original_engine = scene.render.engine
     original_active = context.view_layer.objects.active
     original_mode = obj.mode
+    original_hide_render = obj.hide_render # Phase 6
     
     # Ensure we are in OBJECT mode for baking
     if obj.mode != 'EDIT':
@@ -57,6 +58,9 @@ def bake(context, obj, texture_node_name, target_image, src_uv_name="Projected U
     else:
         # If in edit mode, toggle out
         bpy.ops.object.mode_set(mode='OBJECT')
+
+    # MANDATORY: Enable render visibility for the duration of bake
+    obj.hide_render = False
     
     try:
         # 1. Setup Cycles for baking
@@ -186,4 +190,7 @@ def bake(context, obj, texture_node_name, target_image, src_uv_name="Projected U
         if original_mode != obj.mode:
             try: bpy.ops.object.mode_set(mode=original_mode)
             except: pass
+        
+        # Phase 6 Restore: Render Visibility
+        obj.hide_render = original_hide_render
 
