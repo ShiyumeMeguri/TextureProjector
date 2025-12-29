@@ -310,63 +310,38 @@ def capture_viewport_to_file(operator, context, scene, props, space_data, region
             original_render_engine = scene.render.engine
             original_filepath = scene.render.filepath
             
-            if has_camera and not show_wireframe:
-                # ======================================================
-                # CAMERA RENDER MODE: Use bpy.ops.render.render()
-                # This renders from the scene camera, matching UV projection
-                # ======================================================
-                print(f"📷 [GEMINI] Using CAMERA RENDER for capture (Camera: {scene.camera.name})")
-                
-                # Setup render settings
-                scene.render.filepath = target_path
-                scene.render.image_settings.file_format = 'PNG'
-                
-                # Ensure EEVEE for fast preview render
+            # UNIFIED COLOR CAPTURE LOGIC (High speed via OpenGL)
+            # This matches dream-textures efficiency for both Camera and Viewport
+            print(f"🎬 [GEMINI] Using HIGH-SPEED CAPTURE for {'wireframe' if show_wireframe else 'color'} ({'Camera' if has_camera else 'Viewport'})")
+            
+            # Setup for capture
+            if show_wireframe:
+                space_data.shading.type = 'WIREFRAME'
+            else:
+                # Ensure EEVEE + RENDERED for high quality but fast color capture
                 if scene.render.engine not in ['BLENDER_EEVEE', 'BLENDER_EEVEE_NEXT']:
                     try:
                         scene.render.engine = 'BLENDER_EEVEE_NEXT'
                     except:
                         scene.render.engine = 'BLENDER_EEVEE'
-                    print(f"🔄 [GEMINI] Switched to {scene.render.engine} for camera render")
-                
-                # Execute camera render
-                bpy.ops.render.render(write_still=True)
-                
-                # Restore
-                scene.render.filepath = original_filepath
-                scene.render.engine = original_render_engine
-                
-                print(f"📷 [GEMINI] Camera render saved to: {target_path}")
-                return True
-            else:
-                # ======================================================
-                # VIEWPORT RENDER MODE: Use bpy.ops.render.opengl()
-                # Fallback when no camera, or for wireframe simulation
-                # ======================================================
-                print(f"👁️ [GEMINI] Using VIEWPORT RENDER for capture {'(wireframe mode)' if show_wireframe else '(no camera fallback)'}")
-                
-                if show_wireframe:
-                    space_data.shading.type = 'WIREFRAME'
-                else:
-                    # For Viewport Color mode, we need EEVEE + RENDERED shading
-                    if props.projection_source == 'COLOR':
-                        if scene.render.engine not in ['BLENDER_EEVEE', 'BLENDER_EEVEE_NEXT']:
-                            try:
-                                scene.render.engine = 'BLENDER_EEVEE_NEXT'
-                            except:
-                                scene.render.engine = 'BLENDER_EEVEE'
-                            print(f"🔄 [GEMINI] Temporarily switched to {scene.render.engine} for color capture")
-                        space_data.shading.type = 'RENDERED'
-                    else:
-                        space_data.shading.type = 'SOLID'
-                
-                scene.render.filepath = target_path
-                bpy.ops.render.opengl(write_still=True, view_context=True)
-                
-                # Restore state
-                space_data.shading.type = original_shading_type
-                scene.render.engine = original_render_engine
-                return True
+                space_data.shading.type = 'RENDERED'
+            
+            # Set target resolution and path
+            # (Resolution already snapped and set in scene.render by caller)
+            scene.render.filepath = target_path
+            scene.render.image_settings.file_format = 'PNG'
+            
+            # Execute capture
+            # view_context=True ensures it respects the current camera/viewport state
+            bpy.ops.render.opengl(write_still=True, view_context=True)
+            
+            # Restore state
+            space_data.shading.type = original_shading_type
+            scene.render.engine = original_render_engine
+            scene.render.filepath = original_filepath
+            
+            print(f"✅ [GEMINI] Capture saved: {target_path}")
+            return True
             
     except Exception as e:
         print(f"❌ [GEMINI] Capture helper failed: {e}")
