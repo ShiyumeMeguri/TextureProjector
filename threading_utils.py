@@ -897,155 +897,67 @@ class ProjectionRenderThread(threading.Thread):
                     if self.do_bake:
                         update_render_status(self.scene, "Baking projection (Blender Native)...", True)
                         
-                        # AGGRESSIVE POST-BAKE RESTORATION HELPER
-                        def _finalize_object_materials(target_obj, target_img, dest_uv_name, search_img=None, node_name=None):
-                            if not target_obj or not target_obj.data or not hasattr(target_obj.data, 'materials'):
-                                return
-                                
-                            print(f" Aggressively finalizing materials for {target_obj.name} (Target UV: {dest_uv_name})")
-                            for slot in target_obj.material_slots:
-                                if slot.material and slot.material.use_nodes:
-                                    m_nodes = slot.material.node_tree.nodes
-                                    m_links = slot.material.node_tree.links
-                                    
-                                    # I force specific restoration for ANY node matching our criteria
-                                    for node in m_nodes:
-                                        is_match = False
-                                        if node.type == 'TEX_IMAGE':
-                                            # I match by direct reference
-                                            if node.image and (node.image == target_img or (search_img and node.image == search_img)):
-                                                is_match = True
-                                            # I match by name
-                                            elif node.name == node_name:
-                                                is_match = True
-                                            # I match by image name match (fuzzy backup)
-                                            elif target_img and node.image and node.image.name == target_img.name:
-                                                is_match = True
-                                        
-                                        if is_match:
-                                            # 1. Update image to the final baked result
-                                            if target_img:
-                                                node.image = target_img
-                                            
-                                            # 2. Fix UV mapping node
-                                            uv_node = None
-                                            if node.inputs['Vector'].is_linked:
-                                                from_node = node.inputs['Vector'].links[0].from_node
-                                                if from_node.type == 'UV_MAP':
-                                                    uv_node = from_node
-                                            
-
-                                            if not uv_node:
-                                                print(f" Linking new UV Map node to {node.name} in {slot.material.name}")
-                                                # I clear existing links to vector
-                                                for l in node.inputs['Vector'].links:
-                                                    m_links.remove(l)
-                                                uv_node = m_nodes.new('ShaderNodeUVMap')
-                                                m_links.new(uv_node.outputs['UV'], node.inputs['Vector'])
-                                            
-                                            # 3. FORCE SET THE UV MAP
-                                            if uv_node:
-                                                uv_node.uv_map = dest_uv_name
-                                                print(f" Material '{slot.material.name}' node '{node.name}' finalized (UV: {dest_uv_name})")
-
-                            # I also restore active render layer on the mesh itself
-                            if dest_uv_name in target_obj.data.uv_layers:
-                                target_obj.data.uv_layers.active = target_obj.data.uv_layers[dest_uv_name]
-                                target_obj.data.uv_layers[dest_uv_name].active_render = True
-
                         for data in self.target_objects_data:
                             obj = bpy.data.objects.get(data['object_name'])
                             if not obj: continue
                             
                             # ============================================================
-                            # STRICT MASK REPAIR GUARD
+                            # MASK REPAIR MODE
                             # ============================================================
                             if self.mask_repair_data:
-                                # I in Repair Mode, we MUST only process items that are explicitly identified as repair sources.
-                                # I these items MUST have 'original_object_name' set.
                                 original_obj_name = data.get('original_object_name')
                                 
                                 if not original_obj_name:
-                                    print(f"🛡 Mask Repair Mode Active: Skipping non-repair object '{obj.name}' (Guard against global bake leak)")
+                                    print(f"🛡 Mask Repair Mode: Skipping non-repair object '{obj.name}'")
                                     continue
-                                    
-                                # I double check: Ensure we are processing the TEMP object (source), not the original
-                                # I the Temp object usually has '_MaskTemp' in name, or we check against our list
-                                if obj.name not in self.mask_repair_data.get('temp_objects', []):
-                                     # Careful: if the name check logic in operators.py was loose, we might have mismatch.
-                                     # I but generally, rely on original_object_name being present.
-                                     pass
 
-                                print(f"Mask Repair Mode: Processing Temp Source '{obj.name}' -> Original Target '{original_obj_name}'")
+                                print(f"Mask Repair Mode: {obj.name} -> {original_obj_name}")
                                 
-
                                 original_tex_name = self.mask_repair_data['original_textures'].get(original_obj_name)
                                 if not original_tex_name or original_tex_name not in bpy.data.images:
-                                    print(f" Mask Repair Mode: Original texture '{original_tex_name}' not found for {original_obj_name}")
+                                    print(f"  Mask Repair: Original texture '{original_tex_name}' not found")
                                     continue
                                 
                                 original_tex = bpy.data.images[original_tex_name]
-                                print(f"Mask Repair Mode: Target texture = '{original_tex.name}'")
+                                orig_obj_ref = bpy.data.objects.get(original_obj_name)
                                 
-                                # I perform incremental bake - NO CLEAR, NO MARGIN
-                                try:
-                                    print(f"Mask Repair Mode: Baking with use_clear=False, margin=0")
-                                    projection_utils.bake(
-                                        context=bpy.context,
-                                        obj=obj, # I temp Object as Source
-                                        texture_node_name=self.image_node_name,
-                                        target_image=original_tex, # I target Original Texture
-                                        src_uv_name=data['src_uv_name'],
-                                        margin=1,
-                                        use_clear=False
-                                    )
-                                    print(f" Mask Repair Mode: Incremental bake completed for {obj.name}")
-                                    
-                                    # UV FIX: Ensure Original Object materials are restored
-                                    orig_obj_ref = bpy.data.objects.get(original_obj_name)
-                                    if orig_obj_ref:
-                                         _finalize_object_materials(
-                                             target_obj=orig_obj_ref, 
-                                             target_img=original_tex, 
-                                             dest_uv_name=data.get('dest_uv_name', "UVMap"),
-                                             node_name=self.image_node_name
-                                         )
-                                         print(f" Restored active render UV and materials on original object")
-
-                                except Exception as e:
-                                    print(f" Mask Repair Mode: Bake failed for {obj.name}: {e}")
-                                    import traceback
-                                    traceback.print_exc()
-                                
-                                continue # I skip NORMAL MODE for this item
-                            
-                            # ============================================================
-                            # NORMAL MODE (Only runs if mask_repair_data is None)
-                            # ============================================================
-                            
-                            # CRITICAL: Skip temp mask objects if they somehow got here without mask_repair_data (shouldn't happen but safety)
-                            if '_MaskTemp' in obj.name:
-                                print(f"Skipping temp mask object '{obj.name}' in normal bake loop")
+                                # Use unified bake function
+                                projection_utils.perform_projection_bake(
+                                    context=bpy.context,
+                                    obj=obj,
+                                    texture_node_name=self.image_node_name,
+                                    target_image=original_tex,
+                                    src_uv_name=data['src_uv_name'],
+                                    dest_uv_name=data.get('dest_uv_name', "UVMap"),
+                                    is_mask_repair=True,
+                                    original_obj=orig_obj_ref
+                                )
                                 continue
                             
-
+                            # ============================================================
+                            # NORMAL MODE
+                            # ============================================================
+                            if '_MaskTemp' in obj.name:
+                                print(f"Skipping temp mask object '{obj.name}'")
+                                continue
+                            
+                            # Create unique baked image
                             baked_name = f"{obj.name}_Baked_AI"
                             if baked_name in bpy.data.images:
                                 bpy.data.images.remove(bpy.data.images[baked_name])
                             baked_img = bpy.data.images.new(baked_name, res_img.size[0], res_img.size[1])
                             
-                            # I ensure we have a valid material reference
+                            # Prepare material for baking
                             if not material:
                                 material = bpy.data.materials.get(self.material_name)
                                 
-                            # I prepare Material for this object
                             baked_mat_name = f"{material.name}_{obj.name}_Baked"
                             obj_mat = bpy.data.materials.get(baked_mat_name)
                             if not obj_mat:
                                 obj_mat = material.copy()
                                 obj_mat.name = baked_mat_name
                             
-                            # FORCE SHADELESS - Completely clear and rebuild
+                            # Setup emission shader for pure color bake
                             o_nodes = obj_mat.node_tree.nodes
                             o_links = obj_mat.node_tree.links
                             o_nodes.clear()
@@ -1059,13 +971,13 @@ class ProjectionRenderThread(threading.Thread):
                             o_tex.location = (0, 0)
                             o_uv = o_nodes.new("ShaderNodeUVMap")
                             o_uv.name = "Gemini_UV_Map"
-                            o_uv.uv_map = data.get('dest_uv_name', "UVMap") # INITIAL FIX
+                            o_uv.uv_map = data.get('dest_uv_name', "UVMap")
                             o_uv.location = (-200, 0)
                             o_links.new(o_uv.outputs['UV'], o_tex.inputs['Vector'])
                             o_links.new(o_tex.outputs['Color'], o_emit.inputs['Color'])
                             o_links.new(o_emit.outputs['Emission'], o_out.inputs['Surface'])
                             
-                            # I unique material assignment
+                            # Unique material assignment per object
                             unique_mats_map = {}
                             for m_idx, slot in enumerate(obj.material_slots):
                                 if not slot.material: continue
@@ -1079,40 +991,26 @@ class ProjectionRenderThread(threading.Thread):
                                     proj_node = unique_mats_map[mat].node_tree.nodes.get(self.image_node_name)
                                     if proj_node:
                                         proj_node.image = res_img
-                                        print(f"Prepared unique material {new_mat.name} with AI result")
 
-                            # I configure UV Layer for baking
+                            # Configure UV Layer for baking
                             if data['dest_uv_name'] in obj.data.uv_layers:
                                 obj.data.uv_layers.active = obj.data.uv_layers[data['dest_uv_name']]
                                 obj.data.uv_layers[data['dest_uv_name']].active_render = True
-                                print(f"{obj.name} set {data['dest_uv_name']} as active for baking")
                             
-                            # I perform Native Bake
-                            try:
-                                margin = getattr(self.scene.gemini_render, "bake_margin", 16)
-                                projection_utils.bake(
-                                    context=bpy.context,
-                                    obj=obj,
-                                    texture_node_name=self.image_node_name,
-                                    target_image=baked_img,
-                                    src_uv_name=data['src_uv_name'],
-                                    margin=margin
-                                )
-                            except Exception as e:
-                                print(f" Native bake failed for {obj.name}: {e}")
-                                continue
-                            
-                            # I apply to current object
-                            _finalize_object_materials(
-                                target_obj=obj, 
-                                target_img=baked_img, 
+                            # Perform bake using unified function
+                            margin = getattr(self.scene.gemini_render, "bake_margin", 16)
+                            projection_utils.perform_projection_bake(
+                                context=bpy.context,
+                                obj=obj,
+                                texture_node_name=self.image_node_name,
+                                target_image=baked_img,
+                                src_uv_name=data['src_uv_name'],
                                 dest_uv_name=data.get('dest_uv_name', "UVMap"),
-                                search_img=res_img, # MATCH PREVIEW IMAGE
-                                node_name=self.image_node_name
+                                margin=margin,
+                                search_img=res_img
                             )
                             
                             baked_img.pack()
-                            print(f" Bake successful for {obj.name}")
                     
                     update_render_status(self.scene, "Projection completed!", False)
                     

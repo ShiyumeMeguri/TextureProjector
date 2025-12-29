@@ -1946,17 +1946,17 @@ class GEMINI_OT_debug_next(Operator):
                         if obj and orig_tex:
                             print(f"5.2 [DEBUG] Target Texture: {orig_tex.name}")
                             
-                            # I incremental Bake Logic
-                            projection_utils.bake(
+                            # Use unified bake function
+                            projection_utils.perform_projection_bake(
                                 context=context,
                                 obj=obj,
                                 texture_node_name="Gemini_Image_Node",
-                                target_image=orig_tex, # In-Place
+                                target_image=orig_tex,
                                 src_uv_name="Projected UVs",
-                                margin=1,
-                                use_clear=False
+                                dest_uv_name="",  # Debug uses default
+                                is_mask_repair=True
                             )
-                            print(" Bake Finished")
+                            print("✓ Bake Finished")
                 
                 props.debug_step += 1
             

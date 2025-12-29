@@ -6,6 +6,132 @@ from gpu_extras.batch import batch_for_shader
 import mathutils
 import numpy as np
 
+
+def finalize_object_materials(target_obj, target_img, dest_uv_name, search_img=None, node_name=None):
+    """
+    Post-bake material finalization: Updates texture nodes to use baked image and correct UV map.
+    
+    Args:
+        target_obj: The object whose materials should be finalized
+        target_img: The baked image to set on matching texture nodes
+        dest_uv_name: The UV map name to set on UV Map nodes
+        search_img: Optional image to also match against (e.g., preview image)
+        node_name: Optional specific node name to match
+    """
+    if not target_obj or not target_obj.data or not hasattr(target_obj.data, 'materials'):
+        return
+        
+    print(f"  Finalizing materials for {target_obj.name} (Target UV: {dest_uv_name})")
+    for slot in target_obj.material_slots:
+        if slot.material and slot.material.use_nodes:
+            m_nodes = slot.material.node_tree.nodes
+            m_links = slot.material.node_tree.links
+            
+            for node in m_nodes:
+                is_match = False
+                if node.type == 'TEX_IMAGE':
+                    # Match by direct reference
+                    if node.image and (node.image == target_img or (search_img and node.image == search_img)):
+                        is_match = True
+                    # Match by name
+                    elif node.name == node_name:
+                        is_match = True
+                    # Match by image name (fuzzy backup)
+                    elif target_img and node.image and node.image.name == target_img.name:
+                        is_match = True
+                
+                if is_match:
+                    # 1. Update image to the final baked result
+                    if target_img:
+                        node.image = target_img
+                    
+                    # 2. Fix UV mapping node
+                    uv_node = None
+                    if node.inputs['Vector'].is_linked:
+                        from_node = node.inputs['Vector'].links[0].from_node
+                        if from_node.type == 'UV_MAP':
+                            uv_node = from_node
+                    
+                    if not uv_node:
+                        print(f"   Linking new UV Map node to {node.name} in {slot.material.name}")
+                        # Clear existing links to vector
+                        for l in node.inputs['Vector'].links:
+                            m_links.remove(l)
+                        uv_node = m_nodes.new('ShaderNodeUVMap')
+                        m_links.new(uv_node.outputs['UV'], node.inputs['Vector'])
+                    
+                    # 3. Set the UV map
+                    if uv_node:
+                        uv_node.uv_map = dest_uv_name
+                        print(f"   Material '{slot.material.name}' node '{node.name}' finalized (UV: {dest_uv_name})")
+
+    # Restore active render layer on the mesh itself
+    if dest_uv_name in target_obj.data.uv_layers:
+        target_obj.data.uv_layers.active = target_obj.data.uv_layers[dest_uv_name]
+        target_obj.data.uv_layers[dest_uv_name].active_render = True
+
+
+def perform_projection_bake(context, obj, texture_node_name, target_image, src_uv_name, dest_uv_name, 
+                            margin=16, use_clear=True, is_mask_repair=False, 
+                            original_obj=None, search_img=None):
+    """
+    Unified projection bake that handles both normal and mask repair modes.
+    
+    Args:
+        context: Blender context
+        obj: Object to bake from (source)
+        texture_node_name: Name of the image texture node containing the source
+        target_image: Image to bake onto
+        src_uv_name: Source UV map name (e.g., "Projected UVs")
+        dest_uv_name: Destination UV map name (e.g., "UVMap")
+        margin: Bake margin in pixels (default 16)
+        use_clear: If True, clears target before baking (default True)
+        is_mask_repair: If True, uses repair mode settings (default False)
+        original_obj: For mask repair mode, the original object to finalize materials on
+        search_img: Optional image to also match against during finalization
+        
+    Returns:
+        True if bake succeeded, False otherwise
+    """
+    try:
+        # Adjust settings for mask repair mode
+        if is_mask_repair:
+            margin = 1
+            use_clear = False
+            print(f"[BAKE] Mask Repair Mode: {obj.name} -> {target_image.name}")
+        else:
+            print(f"[BAKE] Normal Mode: {obj.name} -> {target_image.name}")
+        
+        # Perform the bake
+        bake(
+            context=context,
+            obj=obj,
+            texture_node_name=texture_node_name,
+            target_image=target_image,
+            src_uv_name=src_uv_name,
+            margin=margin,
+            use_clear=use_clear
+        )
+        
+        # Post-bake material finalization
+        finalize_target = original_obj if is_mask_repair and original_obj else obj
+        finalize_object_materials(
+            target_obj=finalize_target,
+            target_img=target_image,
+            dest_uv_name=dest_uv_name,
+            search_img=search_img,
+            node_name=texture_node_name
+        )
+        
+        print(f"✓ Bake completed for {obj.name}")
+        return True
+        
+    except Exception as e:
+        print(f"✗ Bake failed for {obj.name}: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
 def validate_projection(context):
     """Validate if projection can be performed. Ensures selected meshes are in Edit Mode with selected faces."""
     selected_meshes = [obj for obj in context.selected_objects if obj.type == 'MESH']
