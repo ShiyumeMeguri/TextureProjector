@@ -1,4 +1,5 @@
 import bpy
+import math
 from bpy.types import Operator
 from bpy.props import IntProperty, StringProperty
 from bpy_extras.io_utils import ImportHelper
@@ -32,6 +33,40 @@ SUPPORTED_RESOLUTIONS = {
     "16:9":  (1344, 768),
     "21:9":  (1536, 672),
 }
+
+def snap_to_supported_resolution(res_x, res_y):
+    """
+    Find the closest ratio from SUPPORTED_RESOLUTIONS and return a resolution 
+    that matches that ratio while maintaining the approximate scale.
+    Example: 2048x1999 -> Ratio 1.02 -> 1:1 -> 2048x2048
+    """
+    if res_y == 0: return (1024, 1024)
+    target_ratio = res_x / res_y
+    best_ratio_key = "1:1"
+    min_diff = float('inf')
+    
+    for ratio_name, (w, h) in SUPPORTED_RESOLUTIONS.items():
+        match_ratio = w / h
+        diff = abs(target_ratio - match_ratio)
+        if diff < min_diff:
+            min_diff = diff
+            best_ratio_key = ratio_name
+            
+    # Get the official base resolution for this ratio
+    off_w, off_h = SUPPORTED_RESOLUTIONS[best_ratio_key]
+    
+    # Calculate scale factor to match the user's intended resolution magnitude
+    # Example: 2048x1999 and target 1:1 (1024x1024) -> scale = max(2048/1024, 1999/1024) = 2.0
+    scale = max(res_x / off_w, res_y / off_h)
+    
+    final_w = int(off_w * scale)
+    final_h = int(off_h * scale)
+    
+    # Pixel-perfect alignment: Ensure even numbers for encoders and avoid floating artifacts
+    if final_w % 2 != 0: final_w += 1
+    if final_h % 2 != 0: final_h += 1
+    
+    return (final_w, final_h)
 
 # === DEBUG STORAGE ===
 _debug_storage = {
@@ -379,13 +414,18 @@ class GEMINI_OT_texture_projection(Operator):
         use_camera_render = has_camera  # Use camera render when camera exists
         
         if use_camera_render:
-            # Use scene render resolution for UV calculation (matches camera render output)
-            capture_width = scene.render.resolution_x
-            capture_height = scene.render.resolution_y
-            # Apply resolution percentage
-            capture_width = int(capture_width * scene.render.resolution_percentage / 100)
-            capture_height = int(capture_height * scene.render.resolution_percentage / 100)
-            print(f"📷 [GEMINI] CAMERA MODE: Using camera render resolution {capture_width}x{capture_height}")
+            # ======================================================================
+            # CAMERA RESOLUTION ENFORCEMENT: 
+            # Force camera resolution to nearest SUPPORTED_RESOLUTIONS entry
+            # ======================================================================
+            best_res = snap_to_supported_resolution(scene.render.resolution_x, scene.render.resolution_y)
+            print(f"🎯 [GEMINI] Resolution Snap: {scene.render.resolution_x}x{scene.render.resolution_y} -> {best_res[0]}x{best_res[1]}")
+            
+            # Application of resolution involves updating 'capture_width/height'
+            # and later forcing scene.render.resolution_x/y in the capture block.
+            capture_width = best_res[0]
+            capture_height = best_res[1]
+            print(f"📷 [GEMINI] CAMERA MODE: Using snapped resolution {capture_width}x{capture_height}")
             print(f"📷 [GEMINI] Camera type: {'ORTHO' if scene.camera.data.type == 'ORTHO' else 'PERSP'}")
         else:
             # Fallback: Use viewport dimensions
@@ -558,7 +598,13 @@ class GEMINI_OT_texture_projection(Operator):
 
             try:
                 # A. Capture Color (Native Resolution)
-                print(f"[GEMINI] Capturing viewport color ({v_width}x{v_height})...")
+                # Forced Resolution Application (for Camera Render)
+                if use_camera_render:
+                    scene.render.resolution_x = capture_width
+                    scene.render.resolution_y = capture_height
+                    scene.render.resolution_percentage = 100
+                
+                print(f"[GEMINI] Capturing viewport color ({capture_width}x{capture_height})...")
                 props.status_text = "📸 Capturing viewport..."
                 
                 # D. Determine Capture Requirements & Execute
@@ -1798,9 +1844,8 @@ class GEMINI_OT_debug_next(Operator):
                 use_camera_render = has_camera
                 
                 if use_camera_render:
-                    # Use scene render resolution (matches camera render)
-                    v_width = int(scene.render.resolution_x * scene.render.resolution_percentage / 100)
-                    v_height = int(scene.render.resolution_y * scene.render.resolution_percentage / 100)
+                    # Use snapped scene render resolution (matches camera render)
+                    v_width, v_height = snap_to_supported_resolution(scene.render.resolution_x, scene.render.resolution_y)
                 else:
                     # Fallback: viewport dimensions
                     v_width, v_height = region.width, region.height
