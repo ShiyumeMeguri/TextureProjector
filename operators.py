@@ -109,6 +109,10 @@ def get_current_view_state(context):
                                 view_state['lens'] = space.lens
                                 break
         
+        if view_state.get('is_camera_view') and scene.camera:
+            view_state['cam_obj_location'] = scene.camera.location.copy()
+            view_state['cam_obj_rotation'] = scene.camera.rotation_euler.copy()
+        
         print(f"View state captured: CamView={view_state.get('is_camera_view')}")
     except Exception as e:
         print(f"Failed to capture view state: {e}")
@@ -125,18 +129,34 @@ def restore_view_state(context, history_item):
                         rv3d = space.region_3d
                         if rv3d:
 
-                            rv3d.view_location = history_item.cam_location
-                            rv3d.view_rotation = history_item.cam_rotation
-                            rv3d.view_distance = history_item.view_distance
                             
-
                             if history_item.is_camera_view:
+                                # CAMERA VIEW RESTORATION
+                                # 1. Update the actual camera object first
+                                scene = context.scene
+                                if scene.camera:
+                                    scene.camera.location = history_item.cam_obj_location
+                                    scene.camera.rotation_euler = history_item.cam_obj_rotation
+                                    print(" Restored Active Camera Object transform")
+                                
+                                # 2. Force Viewport to look through Camera
+                                # IMPORTANT: Do NOT set rv3d.view_rotation/location here, as that exits Camera View
                                 rv3d.view_perspective = 'CAMERA'
+                                space.lens = history_item.cam_lens
+                                print(" Switched to CAMERA perspecitve")
+                                
                             else:
+                                # STANDARD VIEWPORT RESTORATION
                                 rv3d.view_perspective = 'PERSP'
-                            
+                                rv3d.view_location = history_item.cam_location
+                                rv3d.view_rotation = history_item.cam_rotation
+                                rv3d.view_distance = history_item.view_distance
+                                space.lens = history_item.cam_lens
+                                print(" Restored Viewport Transform")
 
-                            space.lens = history_item.cam_lens
+                            area.tag_redraw()
+                            print(f"View state restored from history")
+                            return True
                             
                             area.tag_redraw()
                             print(f"View state restored from history")

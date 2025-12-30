@@ -182,6 +182,13 @@ def _load_result_image_sync(image_data: bytes, image_name: str = "AI_Result", us
                             item.cam_lens = cam_data.get('lens', 50.0)
                             item.view_distance = cam_data.get('view_distance', 10.0)
                             item.is_camera_view = cam_data.get('is_camera_view', False)
+                            
+                            # Store explicit camera object transform (if available)
+                            if 'cam_obj_location' in cam_data:
+                                item.cam_obj_location = cam_data['cam_obj_location']
+                            if 'cam_obj_rotation' in cam_data:
+                                item.cam_obj_rotation = cam_data['cam_obj_rotation']
+                                
                             print(f" Camera data stored in history item")
                         except Exception as ce:
                             print(f" Failed to store camera data: {ce}")

@@ -50,6 +50,16 @@ class GeminiRenderHistoryItem(PropertyGroup):
     )
     
     is_camera_view: BoolProperty(name="Is Camera View", default=False)
+    
+    # Viewport/View3D State (Standard)
+    cam_location: FloatVectorProperty(name="View Location", size=3)
+    cam_rotation: FloatVectorProperty(name="View Rotation", size=4) # Quaternion
+    cam_lens: FloatProperty(name="Lens", default=50.0)
+    view_distance: FloatProperty(name="View Distance", default=10.0)
+
+    # Actual Camera Object State (For Camera View pixel consistency)
+    cam_obj_location: FloatVectorProperty(name="Camera Obj Location", size=3)
+    cam_obj_rotation: FloatVectorProperty(name="Camera Obj Rotation", size=3) # Euler XYZ
 
 class GeminiRenderProperties(PropertyGroup):
     """Properties for Gemini Render addon stored in scene"""
