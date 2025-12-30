@@ -1,10 +1,10 @@
 """
 Gemini API integration for image generation using official Python SDK
-Minimalist version for Texture Projection - No heavy system prompts.
+Unified logic for Texture Projection.
 """
 
 import os
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict, Any
 from io import BytesIO
 
 # I try importing PIL
@@ -75,57 +75,38 @@ class GeminiAPI:
         # model is already set in __init__
         
     def _build_prompt(self, user_prompt: str, has_reference: bool = False, is_color_render: bool = False) -> str:
-        """
-        Build minimal prompt.
-        Removed all 'rendering' system instructions.
-        Now purely passes user intent for texture projection.
-        """
+        """Build minimal prompt passing user intent."""
         prompt_parts = []
-
-        # 1. Basic role/intent (Optional, keeps it strictly technical)
-        # prompt_parts.append("Generate a texture/image based on the input structure.")
-
-        # 2. Reference handling (Minimal instruction)
         if has_reference:
             prompt_parts.append("Use the provided reference image for style, color, and texture details.")
-
-        # 3. The User Prompt (The only thing that matters now)
         if user_prompt.strip():
             prompt_parts.append(user_prompt.strip())
         else:
             prompt_parts.append("Generate image.")
-
-        # 4. Technical constraint (Optional, but usually good for projection)
-        # prompt_parts.append("Maintain the exact geometry and layout of the input image.")
-
         return "\n\n".join(prompt_parts)
     
     def _build_edit_prompt(self, user_prompt: str, has_mask: bool = False, has_reference: bool = False) -> str:
-        """
-        Build minimal edit prompt.
-        Removed all 'composite/repair' system instructions.
-        """
-        # Pure pass-through of user instructions.
-        # The model infers task from the presence of mask/reference images in the payload.
-        
+        """Build minimal edit prompt."""
         final_prompt = user_prompt.strip()
-        
         if not final_prompt:
             final_prompt = "Edit this image."
-            
         return final_prompt
     
-    def _get_closest_aspect_ratio(self, width: int, height: int) -> str:
+    # =========================================================================
+    # CORE LOGIC: Parameter Calculation (Unified)
+    # =========================================================================
+    
+    def _get_image_config_params(self, width: int, height: int) -> Tuple[str, Optional[str]]:
         """
-        Calculate the closest supported aspect ratio string from input dimensions.
-        Forces the API to respect input geometry over reference image style.
+        Unified logic to determine Aspect Ratio and Image Size.
+        Returns: (aspect_ratio_string, image_size_string_or_None)
         """
+        # 1. Calculate Aspect Ratio (Always needed)
         if width <= 0 or height <= 0:
-            return "1:1"
+            target_ratio = 1.0
+        else:
+            target_ratio = width / height
             
-        target_ratio = width / height
-        
-        # Supported ratios from Gemini API documentation
         ratios = {
             "1:1": 1.0,
             "2:3": 2/3, "3:2": 3/2,
@@ -134,586 +115,331 @@ class GeminiAPI:
             "9:16": 9/16, "16:9": 16/9,
             "21:9": 21/9
         }
+        # Find closest aspect ratio
+        aspect_ratio_str = min(ratios.keys(), key=lambda k: abs(ratios[k] - target_ratio))
         
-        # Find key with minimum difference
-        return min(ratios.keys(), key=lambda k: abs(ratios[k] - target_ratio))
+        # 2. Determine Image Size (Only for Pro/V3 models)
+        image_size_str = None
+        is_pro = "pro" in self.model.lower() or "gemini-3" in self.model.lower()
+        
+        if is_pro:
+            # Logic based on documentation (1K, 2K, 4K)
+            # Thresholds: >2048 triggers 4K, >1024 triggers 2K
+            if width > 2048 or height > 2048:
+                image_size_str = "4K"
+            elif width > 1024 or height > 1024:
+                image_size_str = "2K"
+            else:
+                image_size_str = "1K"
+                
+        return aspect_ratio_str, image_size_str
+
+    # =========================================================================
+    # GENERATION METHODS
+    # =========================================================================
 
     def generate_image(self, depth_image_path: str, user_prompt: str, reference_image_path: str = None, is_color_render: bool = False, width: int = 1024, height: int = 1024) -> Tuple[bytes, str]:
-        """
-        Generate image from depth map and prompt using official SDK
-        """
+        """Generate image from depth/color map and prompt"""
         if self.use_sdk:
             return self._generate_with_sdk(depth_image_path, user_prompt, reference_image_path, is_color_render, width, height)
         else:
             return self._generate_with_rest(depth_image_path, user_prompt, reference_image_path, is_color_render, width, height)
     
     def _generate_with_sdk(self, depth_image_path: str, user_prompt: str, reference_image_path: str = None, is_color_render: bool = False, width: int = 1024, height: int = 1024) -> Tuple[bytes, str]:
-        """Generate image using official Google GenAI SDK"""
         try:
             if not PIL_AVAILABLE:
-                print(" PIL not available for SDK, switching to REST")
                 self.use_sdk = False
                 self._setup_rest_fallback()
                 return self._generate_with_rest(depth_image_path, user_prompt, reference_image_path, is_color_render, width, height)
             
-            # I build complete prompt
+            # Prepare Inputs
             full_prompt = self._build_prompt(user_prompt, has_reference=bool(reference_image_path), is_color_render=is_color_render)
-            
-            # --- PRINT FINAL PAYLOAD ---
-            print("\n" + "="*60)
-            print(f"🚀 [GEMINI API] FINAL GENERATE PAYLOAD (SDK) - CLEAN:")
-            print(f"📝 PROMPT: {full_prompt}")
-            print("-" * 30)
-            print(f"📂 INPUT IMAGE: {depth_image_path}")
-            if reference_image_path:
-                print(f"📂 REFERENCE: {reference_image_path}")
-            print("="*60 + "\n")
-            # ---------------------------
-            
-            # I load depth image using PIL
-            depth_image = Image.open(depth_image_path)
-            
-            # I prepare contents for the API call
-            contents = [full_prompt]
-            contents.append(depth_image)
-            
+            contents = [full_prompt, Image.open(depth_image_path)]
             if reference_image_path:
                 try:
-                    reference_image = Image.open(reference_image_path)
-                    contents.append(reference_image)
+                    contents.append(Image.open(reference_image_path))
                 except Exception as e:
-                    print(f" Failed to load reference image: {e}")
+                    print(f" Failed to load reference: {e}")
             
-            # I map resolution
-            resolution_str = "1K"
-            if width >= 4096 or height >= 4096:
-                resolution_str = "4K"
-            elif width >= 2048 or height >= 2048:
-                resolution_str = "2K"
+            # Unified Config Logic
+            aspect_ratio, image_size = self._get_image_config_params(width, height)
+            print(f"🚀 [SDK] Prompting with Aspect Ratio: {aspect_ratio}, Size: {image_size}")
             
-            # Determine correct aspect ratio to prevent reference image override
-            aspect_ratio_str = self._get_closest_aspect_ratio(width, height)
-            print(f"📐 Enforcing Aspect Ratio: {aspect_ratio_str} for input {width}x{height}")
-
-            is_pro = "pro" in self.model.lower() or "gemini-3" in self.model.lower()
-
             try:
-                # Basic config
+                # Build ImageConfig object
+                img_conf_args = {"aspect_ratio": aspect_ratio}
+                if image_size:
+                    img_conf_args["image_size"] = image_size
+                
                 config = types.GenerateContentConfig(
                     temperature=0.8,
                     candidate_count=1,
-                    response_modalities=['TEXT', 'IMAGE']
+                    response_modalities=['TEXT', 'IMAGE'],
+                    image_config=types.ImageConfig(**img_conf_args)
                 )
-                
-                # Try to add image config if available
-                if hasattr(types, 'ImageConfig'):
-                    # [FIX] Logic updated: Always set aspect_ratio. Set image_size only for Pro models.
-                    img_args = {"aspect_ratio": aspect_ratio_str}
-                    if is_pro:
-                        img_args["image_size"] = resolution_str
-                    
-                    img_conf = types.ImageConfig(**img_args)
-                    config.image_config = img_conf
-                else:
-                    # Generic dict fallback
-                    pass # SDK might handle raw dicts differently, keeping it simple for now
-
             except Exception as e:
                 print(f" Config setup warning: {e}")
-                config = types.GenerateContentConfig(
-                    temperature=0.8,
-                    candidate_count=1,
-                    response_modalities=['TEXT', 'IMAGE']
-                )
-            
+                config = types.GenerateContentConfig(temperature=0.8, response_modalities=['TEXT', 'IMAGE'])
+
+            # Call API
             response = self.client.models.generate_content(
                 model=self.model,
                 contents=contents,
                 config=config
             )
-            
-            # I process response parts
-            if not response.candidates or not response.candidates[0].content.parts:
-                raise GeminiAPIError("No image generated.")
-            
-            parts = response.candidates[0].content.parts
-
-            for part in parts:
-                if part.inline_data is not None:
-                    image = Image.open(BytesIO(part.inline_data.data))
-                    if image.mode not in ('RGB', 'RGBA'):
-                        image = image.convert('RGB')
-                    
-                    img_byte_arr = BytesIO()
-                    image.save(img_byte_arr, format='PNG')
-                    return img_byte_arr.getvalue(), "image/png"
-            
-            text_parts = [part.text for part in parts if part.text is not None]
-            if text_parts:
-                return self._create_placeholder_image(f"Model response: {' '.join(text_parts)}")
-            else:
-                raise GeminiAPIError("No image data returned")
+            return self._process_sdk_response(response)
                 
         except Exception as e:
-            if isinstance(e, GeminiAPIError):
-                raise
-            print(f" SDK error: {str(e)}, falling back to REST")
+            if isinstance(e, GeminiAPIError): raise
+            print(f" SDK error: {e}, falling back to REST")
             self.use_sdk = False
             self._setup_rest_fallback()
-            return self._generate_with_rest(depth_image_path, user_prompt, reference_image_path, is_color_render)
+            return self._generate_with_rest(depth_image_path, user_prompt, reference_image_path, is_color_render, width, height)
     
     def _generate_with_rest(self, depth_image_path: str, user_prompt: str, reference_image_path: str = None, is_color_render: bool = False, width: int = 1024, height: int = 1024) -> Tuple[bytes, str]:
-        """Generate image using REST API fallback"""
         try:
-            # I encode images
-            with open(depth_image_path, 'rb') as f:
-                image_base64 = base64.b64encode(f.read()).decode('utf-8')
-            
-            reference_base64 = None
-            if reference_image_path:
-                try:
-                    with open(reference_image_path, 'rb') as f:
-                        reference_base64 = base64.b64encode(f.read()).decode('utf-8')
-                except Exception:
-                    pass
-            
-            # I build complete prompt
+            # Prepare Inputs
             full_prompt = self._build_prompt(user_prompt, has_reference=bool(reference_image_path), is_color_render=is_color_render)
-            
-            # --- PRINT FINAL PAYLOAD ---
-            print("\n" + "="*60)
-            print(f"🚀 [GEMINI API] FINAL GENERATE PAYLOAD (REST) - CLEAN:")
-            print(f"📝 PROMPT: {full_prompt}")
-            print("-" * 30)
-            print(f"📂 INPUT IMAGE: {depth_image_path}")
+            parts = [{"text": full_prompt}, self._load_image_part_rest(depth_image_path)]
             if reference_image_path:
-                print(f"📂 REFERENCE: {reference_image_path}")
-            print("="*60 + "\n")
-            # ---------------------------
+                ref_part = self._load_image_part_rest(reference_image_path)
+                if ref_part: parts.append(ref_part)
             
-            # I prepare REST API request
-            model_path = self.rest_model
-            if not model_path.startswith("models/"):
-                 model_path = f"models/{model_path}"
-                 
-            url = f"{self.base_url}/{model_path}:generateContent?key={self.api_key}"
+            # Unified Config Logic
+            aspect_ratio, image_size = self._get_image_config_params(width, height)
+            print(f"🚀 [REST] Prompting with Aspect Ratio: {aspect_ratio}, Size: {image_size}")
             
-            headers = {
-                'Content-Type': 'application/json',
-                'X-Goog-Api-Client': 'python-blender-addon',
-            }
-            
-            parts = [{"text": full_prompt}]
-            
-            parts.append({
-                "inline_data": {
-                    "mime_type": "image/png",
-                    "data": image_base64
-                }
-            })
-            
-            if reference_base64:
-                parts.append({
-                    "inline_data": {
-                        "mime_type": "image/png",
-                        "data": reference_base64
-                    }
-                })
-            
-            resolution_str = "1K"
-            if width >= 4096 or height >= 4096:
-                resolution_str = "4K"
-            elif width >= 2048 or height >= 2048:
-                resolution_str = "2K"
-            
-            # Determine correct aspect ratio
-            aspect_ratio_str = self._get_closest_aspect_ratio(width, height)
-            print(f"📐 Enforcing Aspect Ratio (REST): {aspect_ratio_str}")
-
-            is_pro = "pro" in self.model.lower() or "gemini-3" in self.model.lower()
-            
-            def _build_payload(res_str: str = None):
+            # Build Payload Helper
+            def _build_payload(use_size: bool = True):
                 gen_cfg = {
                     "temperature": 0.8,
                     "maxOutputTokens": 32768,
                     "candidateCount": 1,
                     "responseModalities": ["TEXT", "IMAGE"],
                 }
-                
-                # [FIX] Always create imageConfig with aspectRatio
-                # This ensures input geometry is respected even for Flash models or when size is default
-                img_cfg = {"aspectRatio": aspect_ratio_str}
-                
-                # Add imageSize only if provided (e.g., for Pro models)
-                if res_str:
-                    img_cfg["imageSize"] = res_str
+                # Always send aspectRatio, conditionally send imageSize
+                img_cfg = {"aspectRatio": aspect_ratio}
+                if use_size and image_size:
+                    img_cfg["imageSize"] = image_size
                 
                 gen_cfg["imageConfig"] = img_cfg
-                
-                return {
-                    "contents": [{"parts": parts}],
-                    "generationConfig": gen_cfg
-                }
+                return {"contents": [{"parts": parts}], "generationConfig": gen_cfg}
 
-            # Pass resolution only if Pro, otherwise None (letting Flash default to its size but forcing aspect ratio)
-            payload = _build_payload(resolution_str if is_pro else None)
+            # Call API
+            url = f"{self.base_url}/{self.rest_model}:generateContent?key={self.api_key}"
+            headers = {'Content-Type': 'application/json', 'X-Goog-Api-Client': 'python-blender-addon'}
             
-            response = requests.post(url, headers=headers, json=payload, timeout=300)
+            response = requests.post(url, headers=headers, json=_build_payload(True), timeout=300)
             
-            # Retry without imageSize/Config if it fails (extreme fallback)
-            # We modify this fallback: if it fails with config, try without config entirely
+            # Retry logic: if failed due to config, try without imageSize but KEEP aspectRatio
             if response.status_code == 400 and ("imageSize" in response.text or "imageConfig" in response.text):
-                print(" Model rejected imageConfig, retrying without it (Geometry might mismatch)...")
+                print(" Model rejected config, retrying without imageSize...")
+                response = requests.post(url, headers=headers, json=_build_payload(False), timeout=300)
                 
-                # Fallback: totally clean config
-                gen_cfg_fallback = {
-                    "temperature": 0.8,
-                    "maxOutputTokens": 32768,
-                    "candidateCount": 1,
-                    "responseModalities": ["TEXT", "IMAGE"],
-                }
-                payload_fallback = {
-                    "contents": [{"parts": parts}],
-                    "generationConfig": gen_cfg_fallback
-                }
-                response = requests.post(url, headers=headers, json=payload_fallback, timeout=300)
-
-            if response.status_code != 200:
-                raise GeminiAPIError(f"API request failed: {response.status_code} - {response.text}")
-            
-            result = response.json()
-            
-            if 'candidates' not in result or not result['candidates']:
-                raise GeminiAPIError("No candidates in response")
-            
-            candidate = result['candidates'][0]
-            if 'content' not in candidate:
-                raise GeminiAPIError("No content in candidate")
-            
-            parts = candidate['content']['parts'] 
-            
-            for part in parts:
-                inline_data_key = None
-                if 'inline_data' in part: inline_data_key = 'inline_data'
-                elif 'inlineData' in part: inline_data_key = 'inlineData'
-                
-                if inline_data_key:
-                    inline_data = part[inline_data_key]
-                    data_key = 'data' if 'data' in inline_data else 'bytes' if 'bytes' in inline_data else None
-                    
-                    if data_key and inline_data[data_key]:
-                        image_data = base64.b64decode(inline_data[data_key])
-                        mime_type = inline_data.get('mime_type', 'image/png')
-                        return image_data, mime_type
-            
-            text_parts = [part.get('text', '') for part in parts if 'text' in part]
-            if text_parts:
-                return self._create_placeholder_image(f"Model response: {' '.join(text_parts)}")
-            
-            raise GeminiAPIError("No image data found in API response")
+            return self._process_rest_response(response)
             
         except Exception as e:
-            if isinstance(e, GeminiAPIError):
-                raise
+            if isinstance(e, GeminiAPIError): raise
             raise GeminiAPIError(f"Unexpected error: {str(e)}")
-    
-    def _create_placeholder_image(self, text_response: str) -> Tuple[bytes, str]:
-        """Create a placeholder image with text info"""
+
+    # =========================================================================
+    # EDIT METHODS
+    # =========================================================================
+
+    def edit_image(self, image_path: str, edit_prompt: str, mask_path: str = None, reference_image_path: str = None, width: int = 0, height: int = 0) -> Tuple[bytes, str]:
+        """Edit existing image"""
         try:
-            # I simple 100x100 colored PNG
-            width, height = 100, 100
-            png_data = self._create_simple_png(width, height, (0, 100, 200))  # Blue
-            return png_data, "image/png"
-        except Exception as e:
-            raise GeminiAPIError(f"Failed to create placeholder: {str(e)}")
-    
-    def _create_simple_png(self, width: int, height: int, color: tuple) -> bytes:
-        """Create a simple colored PNG"""
-        import zlib
-        import struct
-        
-        # PNG signature
-        png_signature = bytes([137, 80, 78, 71, 13, 10, 26, 10])
-        ihdr_data = struct.pack('>2I5B', width, height, 8, 2, 0, 0, 0)
-        ihdr_crc = zlib.crc32(b'IHDR' + ihdr_data) & 0xffffffff
-        ihdr_chunk = struct.pack('>I', len(ihdr_data)) + b'IHDR' + ihdr_data + struct.pack('>I', ihdr_crc)
-        
-        raw_data = b''
-        r, g, b = color
-        for y in range(height):
-            raw_data += b'\x00'
-            for x in range(width):
-                raw_data += struct.pack('BBB', r, g, b)
-        
-        compressed_data = zlib.compress(raw_data)
-        idat_crc = zlib.crc32(b'IDAT' + compressed_data) & 0xffffffff  
-        idat_chunk = struct.pack('>I', len(compressed_data)) + b'IDAT' + compressed_data + struct.pack('>I', idat_crc)
-        
-        iend_crc = zlib.crc32(b'IEND') & 0xffffffff
-        iend_chunk = struct.pack('>I', 0) + b'IEND' + struct.pack('>I', iend_crc)
-        
-        return png_signature + ihdr_chunk + idat_chunk + iend_chunk
-    
-    def edit_image(self, 
-                   image_path: str, 
-                   edit_prompt: str, 
-                   mask_path: str = None,
-                   reference_image_path: str = None,
-                   width: int = 0,
-                   height: int = 0) -> Tuple[bytes, str]:
-        """
-        Edit existing image with AI based on prompt and optional mask
-        """
-        try:
-            print(f"Starting image edit with model: {self.model}")
-            
-            # I build edit prompt - CLEAN version
-            full_prompt = self._build_edit_prompt(
-                edit_prompt, 
-                has_mask=bool(mask_path),
-                has_reference=bool(reference_image_path)
-            )
-            
-            # --- PRINT FINAL EDIT PAYLOAD ---
-            print("\n" + "="*60)
-            print(f"🚀 [GEMINI API] FINAL EDIT PAYLOAD - CLEAN:")
-            print(f"📝 PROMPT: {full_prompt}")
-            print("-" * 30)
-            print(f"📂 ORIGINAL IMAGE: {image_path}")
-            if mask_path:
-                print(f"📂 MASK IMAGE: {mask_path}")
-            if reference_image_path:
-                print(f"📂 REFERENCE IMAGE: {reference_image_path}")
-            print("="*60 + "\n")
-            # --------------------------------
+            full_prompt = self._build_edit_prompt(edit_prompt, bool(mask_path), bool(reference_image_path))
+            print(f"Starting edit. Model: {self.model}, Prompt: {full_prompt}")
             
             if self.use_sdk:
                 return self._edit_with_sdk(image_path, full_prompt, mask_path, reference_image_path, width, height)
             else:
                 return self._edit_with_rest(image_path, full_prompt, mask_path, reference_image_path, width, height)
-        
         except Exception as e:
-            if isinstance(e, GeminiAPIError):
-                raise
-            raise GeminiAPIError(f"Image edit failed: {str(e)}")
+            if isinstance(e, GeminiAPIError): raise
+            raise GeminiAPIError(f"Edit failed: {str(e)}")
     
     def _edit_with_sdk(self, image_path: str, prompt: str, mask_path: str = None, reference_path: str = None, width: int = 0, height: int = 0) -> Tuple[bytes, str]:
-        """Edit image using SDK"""
         try:
             if not PIL_AVAILABLE:
-                print("PIL not available, switching to REST")
                 self.use_sdk = False
                 self._setup_rest_fallback()
                 return self._edit_with_rest(image_path, prompt, mask_path, reference_path, width, height)
             
-            original_image = Image.open(image_path)
-            
-            # I build contents
+            # Prepare Inputs
+            orig_img = Image.open(image_path)
             contents = [prompt]
-            
-            if reference_path:
-                reference_image = Image.open(reference_path)
-                contents.append(reference_image)
-            
-            contents.append(original_image)
-            
+            if reference_path: contents.append(Image.open(reference_path))
+            contents.append(orig_img)
             if mask_path:
-                mask_image = Image.open(mask_path)
-                if mask_image.mode != 'L':
-                    mask_image = mask_image.convert('L')
-                contents.append(mask_image)
+                mask_img = Image.open(mask_path)
+                if mask_img.mode != 'L': mask_img = mask_img.convert('L')
+                contents.append(mask_img)
             
-            # Resolution logic
-            resolution_str = "1K"
-            target_w, target_h = width, height
-            if target_w <= 0 or target_h <= 0:
-                target_w, target_h = original_image.size
-
-            if target_w >= 4096 or target_h >= 4096: resolution_str = "4K"
-            elif target_w >= 2048 or target_h >= 2048: resolution_str = "2K"
+            # Unified Config Logic
+            # If width/height not provided (0), use image size
+            target_w = width if width > 0 else orig_img.size[0]
+            target_h = height if height > 0 else orig_img.size[1]
             
-            # Global Unified: Apply aspect ratio logic to edits too
-            aspect_ratio_str = self._get_closest_aspect_ratio(target_w, target_h)
-            is_pro = "pro" in self.model.lower() or "gemini-3" in self.model.lower()
-
+            aspect_ratio, image_size = self._get_image_config_params(target_w, target_h)
+            
             try:
-                if hasattr(types, 'ImageConfig'):
-                    # [FIX] Unified aspect ratio logic
-                    img_args = {"aspect_ratio": aspect_ratio_str}
-                    if is_pro:
-                        img_args["image_size"] = resolution_str
-
-                    img_conf = types.ImageConfig(**img_args)
+                img_conf_args = {"aspect_ratio": aspect_ratio}
+                if image_size:
+                    img_conf_args["image_size"] = image_size
                     
-                    config = types.GenerateContentConfig(
-                        temperature=0.7,
-                        candidate_count=1,
-                        response_modalities=['IMAGE'],
-                        image_config=img_conf
-                    )
-                else:
-                    # Dictionary fallback not fully implemented in SDK yet, keep generic
-                    config = types.GenerateContentConfig(temperature=0.7, candidate_count=1, response_modalities=['IMAGE'])
+                config = types.GenerateContentConfig(
+                    temperature=0.7,
+                    candidate_count=1,
+                    response_modalities=['IMAGE'],
+                    image_config=types.ImageConfig(**img_conf_args)
+                )
             except Exception as e:
-                config = types.GenerateContentConfig(temperature=0.7, candidate_count=1, response_modalities=['IMAGE'])
+                config = types.GenerateContentConfig(temperature=0.7, response_modalities=['IMAGE'])
             
             response = self.client.models.generate_content(
                 model=self.model,
                 contents=contents,
                 config=config
             )
-            
-            if not response.candidates or not response.candidates[0].content.parts:
-                raise GeminiAPIError("No content in edit response")
-            
-            parts = response.candidates[0].content.parts
-            for part in parts:
-                if part.inline_data is not None:
-                    image = Image.open(BytesIO(part.inline_data.data))
-                    if image.mode not in ('RGB', 'RGBA'):
-                        image = image.convert('RGB')
-                    img_byte_arr = BytesIO()
-                    image.save(img_byte_arr, format='PNG')
-                    return img_byte_arr.getvalue(), "image/png"
-            
-            raise GeminiAPIError("No image found in edit response")
+            return self._process_sdk_response(response)
             
         except Exception as e:
-            if isinstance(e, GeminiAPIError):
-                raise
+            if isinstance(e, GeminiAPIError): raise
             print(f"SDK edit error: {e}, falling back to REST")
             self.use_sdk = False
             self._setup_rest_fallback()
-            return self._edit_with_rest(image_path, prompt, mask_path, reference_path)
-    
-    def _edit_with_rest(self, image_path: str, prompt: str, mask_path: str = None, reference_path: str = None, width: int = 0, height: int = 0) -> Tuple[bytes, str]:
-        """Edit image using REST API"""
-        try:
-            with open(image_path, 'rb') as f:
-                image_base64 = base64.b64encode(f.read()).decode('utf-8')
-            
-            parts = [{"text": prompt}]
-            
-            if reference_path:
-                with open(reference_path, 'rb') as f:
-                    reference_base64 = base64.b64encode(f.read()).decode('utf-8')
-                parts.append({
-                    "inline_data": {
-                        "mime_type": "image/png",
-                        "data": reference_base64
-                    }
-                })
-            
-            parts.append({
-                "inline_data": {
-                    "mime_type": "image/png",
-                    "data": image_base64
-                }
-            })
-            
-            if mask_path:
-                with open(mask_path, 'rb') as f:
-                    mask_base64 = base64.b64encode(f.read()).decode('utf-8')
-                parts.append({
-                    "inline_data": {
-                        "mime_type": "image/png",
-                        "data": mask_base64
-                    }
-                })
-            
-            # Resolution logic
-            resolution_str = "1K"
-            if width > 0 and height > 0:
-                if width >= 4096 or height >= 4096: resolution_str = "4K"
-                elif width >= 2048 or height >= 2048: resolution_str = "2K"
-            
-            # Global Unified: Apply aspect ratio logic
-            aspect_ratio_str = self._get_closest_aspect_ratio(width, height)
+            return self._edit_with_rest(image_path, prompt, mask_path, reference_path, width, height)
 
-            is_pro = "pro" in self.model.lower() or "gemini-3" in self.model.lower()
+    def _edit_with_rest(self, image_path: str, prompt: str, mask_path: str = None, reference_path: str = None, width: int = 0, height: int = 0) -> Tuple[bytes, str]:
+        try:
+            parts = [{"text": prompt}]
+            if reference_path:
+                p = self._load_image_part_rest(reference_path)
+                if p: parts.append(p)
+            parts.append(self._load_image_part_rest(image_path))
+            if mask_path:
+                p = self._load_image_part_rest(mask_path)
+                if p: parts.append(p)
             
-            def _build_edit_payload(res_str: str = None):
+            # Resolution resolution
+            # If width/height not passed, we need to guess or read file. 
+            # For REST fallback without PIL, we might not know size if 0 passed.
+            # Assuming callers pass valid width/height or we rely on default 1:1 fallback in helper.
+            aspect_ratio, image_size = self._get_image_config_params(width, height)
+            
+            def _build_payload(use_size: bool = True):
                 gen_cfg = {
                     "temperature": 0.7,
                     "maxOutputTokens": 32768,
                     "candidateCount": 1,
                     "responseModalities": ["TEXT", "IMAGE"],
                 }
-                
-                # [FIX] Always create imageConfig with aspectRatio
-                img_cfg = {"aspectRatio": aspect_ratio_str}
-                if res_str:
-                    img_cfg["imageSize"] = res_str
-                
+                img_cfg = {"aspectRatio": aspect_ratio}
+                if use_size and image_size:
+                    img_cfg["imageSize"] = image_size
                 gen_cfg["imageConfig"] = img_cfg
-                
-                return {
-                    "contents": [{"parts": parts}],
-                    "generationConfig": gen_cfg
-                }
-            
-            payload = _build_edit_payload(resolution_str if is_pro else None)
-            
+                return {"contents": [{"parts": parts}], "generationConfig": gen_cfg}
+
             url = f"{self.base_url}/{self.rest_model}:generateContent?key={self.api_key}"
-            headers = {
-                'Content-Type': 'application/json',
-                'X-Goog-Api-Client': 'python-blender-addon',
-            }
+            headers = {'Content-Type': 'application/json', 'X-Goog-Api-Client': 'python-blender-addon'}
             
-            response = requests.post(url, headers=headers, json=payload, timeout=300)
+            response = requests.post(url, headers=headers, json=_build_payload(True), timeout=300)
             
             if response.status_code == 400 and ("imageSize" in response.text or "imageConfig" in response.text):
-                print(" Model might not support imageSize/Config, retrying without it...")
-                # Total fallback - drop entire imageConfig
-                payload_fallback = _build_edit_payload(None)
-                del payload_fallback['generationConfig']['imageConfig']
-                response = requests.post(url, headers=headers, json=payload_fallback, timeout=300)
+                 print(" Model rejected config, retrying without imageSize...")
+                 response = requests.post(url, headers=headers, json=_build_payload(False), timeout=300)
             
-            if response.status_code != 200:
-                raise GeminiAPIError(f"Edit request failed: {response.status_code} - {response.text}")
-            
-            result = response.json()
-            if 'candidates' not in result or not result['candidates']:
-                raise GeminiAPIError("No candidates in edit response")
-            
-            parts = result['candidates'][0]['content']['parts']
-            for part in parts:
-                inline_data_key = 'inline_data' if 'inline_data' in part else 'inlineData' if 'inlineData' in part else None
-                if inline_data_key:
-                    inline_data = part[inline_data_key]
-                    data_key = 'data' if 'data' in inline_data else 'bytes' if 'bytes' in inline_data else None
-                    if data_key and inline_data[data_key]:
-                        image_data = base64.b64decode(inline_data[data_key])
-                        mime_type = inline_data.get('mime_type', 'image/png')
-                        return image_data, mime_type
-            
-            raise GeminiAPIError("No image found in edit response")
-            
+            return self._process_rest_response(response)
+
         except requests.RequestException as e:
-            raise GeminiAPIError(f"Network error during edit: {str(e)}")
+            raise GeminiAPIError(f"Network error: {str(e)}")
         except Exception as e:
-            if isinstance(e, GeminiAPIError):
-                raise
+            if isinstance(e, GeminiAPIError): raise
             raise GeminiAPIError(f"Edit failed: {str(e)}")
 
+    # =========================================================================
+    # HELPERS
+    # =========================================================================
+
+    def _load_image_part_rest(self, path: str) -> Optional[Dict]:
+        try:
+            with open(path, 'rb') as f:
+                b64 = base64.b64encode(f.read()).decode('utf-8')
+            return {"inline_data": {"mime_type": "image/png", "data": b64}}
+        except:
+            return None
+
+    def _process_sdk_response(self, response) -> Tuple[bytes, str]:
+        if not response.candidates or not response.candidates[0].content.parts:
+            raise GeminiAPIError("No output generated.")
+        
+        for part in response.candidates[0].content.parts:
+            if part.inline_data is not None:
+                image = Image.open(BytesIO(part.inline_data.data))
+                if image.mode not in ('RGB', 'RGBA'): image = image.convert('RGB')
+                buf = BytesIO()
+                image.save(buf, format='PNG')
+                return buf.getvalue(), "image/png"
+        
+        text_parts = [p.text for p in response.candidates[0].content.parts if p.text]
+        if text_parts:
+            return self._create_placeholder_image(f"Response: {' '.join(text_parts)}")
+        raise GeminiAPIError("No image data returned")
+
+    def _process_rest_response(self, response) -> Tuple[bytes, str]:
+        if response.status_code != 200:
+            raise GeminiAPIError(f"API Error {response.status_code}: {response.text}")
+        
+        result = response.json()
+        if 'candidates' not in result or not result['candidates']:
+            raise GeminiAPIError("No candidates.")
+        
+        parts = result['candidates'][0]['content'].get('parts', [])
+        for part in parts:
+            inline = part.get('inline_data') or part.get('inlineData')
+            if inline:
+                data = inline.get('data') or inline.get('bytes')
+                if data:
+                    return base64.b64decode(data), inline.get('mime_type', 'image/png')
+        
+        text_parts = [p.get('text', '') for p in parts if 'text' in p]
+        if text_parts:
+            return self._create_placeholder_image(f"Response: {' '.join(text_parts)}")
+        
+        raise GeminiAPIError("No image found in response")
+
+    def _create_placeholder_image(self, text_response: str) -> Tuple[bytes, str]:
+        # Simple blue 100x100 png
+        return self._create_simple_png(100, 100, (0, 100, 200)), "image/png"
+
+    def _create_simple_png(self, width: int, height: int, color: tuple) -> bytes:
+        import zlib, struct
+        png_sig = bytes([137, 80, 78, 71, 13, 10, 26, 10])
+        ihdr = struct.pack('>2I5B', width, height, 8, 2, 0, 0, 0)
+        ihdr_c = zlib.crc32(b'IHDR' + ihdr) & 0xffffffff
+        ihdr_chunk = struct.pack('>I', len(ihdr)) + b'IHDR' + ihdr + struct.pack('>I', ihdr_c)
+        raw = b''
+        for _ in range(height):
+            raw += b'\x00' + struct.pack('BBB', *color) * width
+        idat = zlib.compress(raw)
+        idat_c = zlib.crc32(b'IDAT' + idat) & 0xffffffff
+        idat_chunk = struct.pack('>I', len(idat)) + b'IDAT' + idat + struct.pack('>I', idat_c)
+        iend_c = zlib.crc32(b'IEND') & 0xffffffff
+        iend_chunk = struct.pack('>I', 0) + b'IEND' + struct.pack('>I', iend_c)
+        return png_sig + ihdr_chunk + idat_chunk + iend_chunk
+
 def get_api_key() -> Optional[str]:
-    """Get API key from environment variable or addon preferences"""
     api_key = os.environ.get('GEMINI_API_KEY', '').strip()
-    if api_key:
-        return api_key
-    
+    if api_key: return api_key
     import bpy
     try:
         prefs = bpy.context.preferences.addons[__package__].preferences
-        if hasattr(prefs, 'api_key') and prefs.api_key.strip():
-            return prefs.api_key.strip()
-    except:
-        pass
-    
+        if hasattr(prefs, 'api_key') and prefs.api_key.strip(): return prefs.api_key.strip()
+    except: pass
     try:
         if hasattr(bpy.context.scene, 'gemini_render') and bpy.context.scene.gemini_render.api_key.strip():
             return bpy.context.scene.gemini_render.api_key.strip()
-    except:
-        pass
-    
+    except: pass
     return None
