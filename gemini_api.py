@@ -115,6 +115,29 @@ class GeminiAPI:
             
         return final_prompt
     
+    def _get_closest_aspect_ratio(self, width: int, height: int) -> str:
+        """
+        Calculate the closest supported aspect ratio string from input dimensions.
+        Forces the API to respect input geometry over reference image style.
+        """
+        if width <= 0 or height <= 0:
+            return "1:1"
+            
+        target_ratio = width / height
+        
+        # Supported ratios from Gemini API documentation
+        ratios = {
+            "1:1": 1.0,
+            "2:3": 2/3, "3:2": 3/2,
+            "3:4": 3/4, "4:3": 4/3,
+            "4:5": 4/5, "5:4": 5/4,
+            "9:16": 9/16, "16:9": 16/9,
+            "21:9": 21/9
+        }
+        
+        # Find key with minimum difference
+        return min(ratios.keys(), key=lambda k: abs(ratios[k] - target_ratio))
+
     def generate_image(self, depth_image_path: str, user_prompt: str, reference_image_path: str = None, is_color_render: bool = False, width: int = 1024, height: int = 1024) -> Tuple[bytes, str]:
         """
         Generate image from depth map and prompt using official SDK
@@ -168,6 +191,12 @@ class GeminiAPI:
             elif width >= 2048 or height >= 2048:
                 resolution_str = "2K"
             
+            # Determine correct aspect ratio to prevent reference image override
+            aspect_ratio_str = self._get_closest_aspect_ratio(width, height)
+            print(f"📐 Enforcing Aspect Ratio: {aspect_ratio_str} for input {width}x{height}")
+
+            is_pro = "pro" in self.model.lower() or "gemini-3" in self.model.lower()
+
             try:
                 # Basic config
                 config = types.GenerateContentConfig(
@@ -178,10 +207,12 @@ class GeminiAPI:
                 
                 # Try to add image config if available
                 if hasattr(types, 'ImageConfig'):
-                    img_conf = types.ImageConfig(
-                        image_size=resolution_str,
-                        # [FIX] Removed aspect_ratio="1:1" to allow non-square resolutions from threading_utils
-                    )
+                    # [FIX] Logic updated: Always set aspect_ratio. Set image_size only for Pro models.
+                    img_args = {"aspect_ratio": aspect_ratio_str}
+                    if is_pro:
+                        img_args["image_size"] = resolution_str
+                    
+                    img_conf = types.ImageConfig(**img_args)
                     config.image_config = img_conf
                 else:
                     # Generic dict fallback
@@ -295,6 +326,10 @@ class GeminiAPI:
             elif width >= 2048 or height >= 2048:
                 resolution_str = "2K"
             
+            # Determine correct aspect ratio
+            aspect_ratio_str = self._get_closest_aspect_ratio(width, height)
+            print(f"📐 Enforcing Aspect Ratio (REST): {aspect_ratio_str}")
+
             is_pro = "pro" in self.model.lower() or "gemini-3" in self.model.lower()
             
             def _build_payload(res_str: str = None):
@@ -304,25 +339,44 @@ class GeminiAPI:
                     "candidateCount": 1,
                     "responseModalities": ["TEXT", "IMAGE"],
                 }
+                
+                # [FIX] Always create imageConfig with aspectRatio
+                # This ensures input geometry is respected even for Flash models or when size is default
+                img_cfg = {"aspectRatio": aspect_ratio_str}
+                
+                # Add imageSize only if provided (e.g., for Pro models)
                 if res_str:
-                    gen_cfg["imageConfig"] = {
-                        "imageSize": res_str,
-                        # [FIX] Removed aspectRatio to allow API to infer from input image
-                    }
+                    img_cfg["imageSize"] = res_str
+                
+                gen_cfg["imageConfig"] = img_cfg
+                
                 return {
                     "contents": [{"parts": parts}],
                     "generationConfig": gen_cfg
                 }
 
+            # Pass resolution only if Pro, otherwise None (letting Flash default to its size but forcing aspect ratio)
             payload = _build_payload(resolution_str if is_pro else None)
             
             response = requests.post(url, headers=headers, json=payload, timeout=300)
             
-            # Retry without imageSize if it fails (fallback for some models)
+            # Retry without imageSize/Config if it fails (extreme fallback)
+            # We modify this fallback: if it fails with config, try without config entirely
             if response.status_code == 400 and ("imageSize" in response.text or "imageConfig" in response.text):
-                print(" Model doesn't support imageSize, retrying without it...")
-                payload = _build_payload(None)
-                response = requests.post(url, headers=headers, json=payload, timeout=300)
+                print(" Model rejected imageConfig, retrying without it (Geometry might mismatch)...")
+                
+                # Fallback: totally clean config
+                gen_cfg_fallback = {
+                    "temperature": 0.8,
+                    "maxOutputTokens": 32768,
+                    "candidateCount": 1,
+                    "responseModalities": ["TEXT", "IMAGE"],
+                }
+                payload_fallback = {
+                    "contents": [{"parts": parts}],
+                    "generationConfig": gen_cfg_fallback
+                }
+                response = requests.post(url, headers=headers, json=payload_fallback, timeout=300)
 
             if response.status_code != 200:
                 raise GeminiAPIError(f"API request failed: {response.status_code} - {response.text}")
@@ -471,17 +525,26 @@ class GeminiAPI:
             
             # Resolution logic
             resolution_str = "1K"
-            if width > 0 and height > 0:
-                if width >= 4096 or height >= 4096: resolution_str = "4K"
-                elif width >= 2048 or height >= 2048: resolution_str = "2K"
-            else:
-                w, h = original_image.size
-                if w >= 4096 or h >= 4096: resolution_str = "4K"
-                elif w >= 2048 or h >= 2048: resolution_str = "2K"
-                
+            target_w, target_h = width, height
+            if target_w <= 0 or target_h <= 0:
+                target_w, target_h = original_image.size
+
+            if target_w >= 4096 or target_h >= 4096: resolution_str = "4K"
+            elif target_w >= 2048 or target_h >= 2048: resolution_str = "2K"
+            
+            # Global Unified: Apply aspect ratio logic to edits too
+            aspect_ratio_str = self._get_closest_aspect_ratio(target_w, target_h)
+            is_pro = "pro" in self.model.lower() or "gemini-3" in self.model.lower()
+
             try:
                 if hasattr(types, 'ImageConfig'):
-                    img_conf = types.ImageConfig(image_size=resolution_str) # [FIX] Removed aspect_ratio="1:1"
+                    # [FIX] Unified aspect ratio logic
+                    img_args = {"aspect_ratio": aspect_ratio_str}
+                    if is_pro:
+                        img_args["image_size"] = resolution_str
+
+                    img_conf = types.ImageConfig(**img_args)
+                    
                     config = types.GenerateContentConfig(
                         temperature=0.7,
                         candidate_count=1,
@@ -564,6 +627,9 @@ class GeminiAPI:
                 if width >= 4096 or height >= 4096: resolution_str = "4K"
                 elif width >= 2048 or height >= 2048: resolution_str = "2K"
             
+            # Global Unified: Apply aspect ratio logic
+            aspect_ratio_str = self._get_closest_aspect_ratio(width, height)
+
             is_pro = "pro" in self.model.lower() or "gemini-3" in self.model.lower()
             
             def _build_edit_payload(res_str: str = None):
@@ -573,11 +639,14 @@ class GeminiAPI:
                     "candidateCount": 1,
                     "responseModalities": ["TEXT", "IMAGE"],
                 }
+                
+                # [FIX] Always create imageConfig with aspectRatio
+                img_cfg = {"aspectRatio": aspect_ratio_str}
                 if res_str:
-                    gen_cfg["imageConfig"] = {
-                        "imageSize": res_str,
-                        # [FIX] Removed aspect_ratio="1:1"
-                    }
+                    img_cfg["imageSize"] = res_str
+                
+                gen_cfg["imageConfig"] = img_cfg
+                
                 return {
                     "contents": [{"parts": parts}],
                     "generationConfig": gen_cfg
@@ -594,9 +663,11 @@ class GeminiAPI:
             response = requests.post(url, headers=headers, json=payload, timeout=300)
             
             if response.status_code == 400 and ("imageSize" in response.text or "imageConfig" in response.text):
-                print(" Model might not support imageSize, retrying without it...")
-                payload = _build_edit_payload(None)
-                response = requests.post(url, headers=headers, json=payload, timeout=300)
+                print(" Model might not support imageSize/Config, retrying without it...")
+                # Total fallback - drop entire imageConfig
+                payload_fallback = _build_edit_payload(None)
+                del payload_fallback['generationConfig']['imageConfig']
+                response = requests.post(url, headers=headers, json=payload_fallback, timeout=300)
             
             if response.status_code != 200:
                 raise GeminiAPIError(f"Edit request failed: {response.status_code} - {response.text}")
