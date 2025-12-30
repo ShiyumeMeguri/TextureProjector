@@ -783,7 +783,9 @@ class GEMINI_OT_texture_projection(Operator):
             debug_mode=props.debug_mode,
             source_image_override=source_image_override,
             cam_data=cam_data,
-            reference_path=reference_path_for_thread
+            reference_path=reference_path_for_thread,
+            capture_width=capture_width, # Pass resolved resolution
+            capture_height=capture_height
         )
         self.current_thread.start()
         

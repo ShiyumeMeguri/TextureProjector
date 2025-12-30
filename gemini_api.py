@@ -180,7 +180,7 @@ class GeminiAPI:
                 if hasattr(types, 'ImageConfig'):
                     img_conf = types.ImageConfig(
                         image_size=resolution_str,
-                        aspect_ratio="1:1"
+                        # [FIX] Removed aspect_ratio="1:1" to allow non-square resolutions from threading_utils
                     )
                     config.image_config = img_conf
                 else:
@@ -307,7 +307,7 @@ class GeminiAPI:
                 if res_str:
                     gen_cfg["imageConfig"] = {
                         "imageSize": res_str,
-                        "aspectRatio": "1:1"
+                        # [FIX] Removed aspectRatio to allow API to infer from input image
                     }
                 return {
                     "contents": [{"parts": parts}],
@@ -481,7 +481,7 @@ class GeminiAPI:
                 
             try:
                 if hasattr(types, 'ImageConfig'):
-                    img_conf = types.ImageConfig(image_size=resolution_str, aspect_ratio="1:1")
+                    img_conf = types.ImageConfig(image_size=resolution_str) # [FIX] Removed aspect_ratio="1:1"
                     config = types.GenerateContentConfig(
                         temperature=0.7,
                         candidate_count=1,
@@ -576,7 +576,7 @@ class GeminiAPI:
                 if res_str:
                     gen_cfg["imageConfig"] = {
                         "imageSize": res_str,
-                        "aspectRatio": "1:1"
+                        # [FIX] Removed aspect_ratio="1:1"
                     }
                 return {
                     "contents": [{"parts": parts}],

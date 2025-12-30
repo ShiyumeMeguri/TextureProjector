@@ -218,7 +218,7 @@ class ProjectionRenderThread(threading.Thread):
     """Background thread for AI Texture Projection pipeline"""
     
     # 1. 在 __init__ 中添加 reference_path 参数
-    def __init__(self, context, api_client, user_prompt, source_path, sim_path, target_objects_data, image_node_name, material_name, do_bake, bypass_api=False, mask_repair_data=None, input_source='COLOR', debug_mode=False, source_image_override=None, cam_data=None, reference_path=None):
+    def __init__(self, context, api_client, user_prompt, source_path, sim_path, target_objects_data, image_node_name, material_name, do_bake, bypass_api=False, mask_repair_data=None, input_source='COLOR', debug_mode=False, source_image_override=None, cam_data=None, reference_path=None, capture_width=1024, capture_height=1024):
         super().__init__(daemon=True)
         self.scene = context.scene
         self.api_client = api_client
@@ -236,8 +236,10 @@ class ProjectionRenderThread(threading.Thread):
         self.source_image_override = source_image_override
         self.cam_data = cam_data
         self.reference_path = reference_path # Store it!
+        self.capture_width = capture_width
+        self.capture_height = capture_height
         self._stop_event = threading.Event()
-        print(f"[GEMINI] Thread init. Reference Path: {self.reference_path}")
+        print(f"[GEMINI] Thread init. Reference Path: {self.reference_path} | Res: {self.capture_width}x{self.capture_height}")
     
     def stop(self):
         self._stop_event.set()
@@ -251,7 +253,6 @@ class ProjectionRenderThread(threading.Thread):
             
             projection_prompt = f"{self.user_prompt}"
             props = self.scene.gemini_render
-            resolution = int(props.resolution)
             
             # === DEBUG MODE: SAVE ACTUAL INPUTS ===
             if self.debug_mode:
@@ -297,8 +298,8 @@ class ProjectionRenderThread(threading.Thread):
                     user_prompt=projection_prompt,
                     reference_image_path=self.reference_path,
                     is_color_render=is_color,
-                    width=resolution,
-                    height=resolution
+                    width=self.capture_width,
+                    height=self.capture_height
                 )
             
             # DEBUG: Save final output (AI or simulated)
