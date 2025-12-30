@@ -544,16 +544,6 @@ class GEMINI_OT_texture_projection(Operator):
                     pass
                 # AI projection handled in thread
 
-                # E. Local Debug Output Setup
-                if props.debug_mode:
-                    blend_path = bpy.data.filepath
-                    base_debug_dir = os.path.join(os.path.dirname(blend_path), "textures") if blend_path else os.path.join(temp_dir, "textures")
-                    if not os.path.exists(base_debug_dir): os.makedirs(base_debug_dir)
-                    
-
-                    shutil.copy2(source_path, os.path.join(base_debug_dir, "input.png"))
-                    print(f"🐞 Debug input (AI Intention) saved: {os.path.join(base_debug_dir, 'input.png')}")
-
             except Exception as capture_error:
                 print(f" Capture Error: {capture_error}")
                 import traceback
