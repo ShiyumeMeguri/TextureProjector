@@ -802,7 +802,7 @@ class ProjectionRenderThread(threading.Thread):
             
             from . import operators # I local import to avoid circularity
             
-            projection_prompt = f"Project this into a texture: {self.user_prompt}"
+            projection_prompt = f"{self.user_prompt}"
             
             # Resolution
             props = self.scene.gemini_render
