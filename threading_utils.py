@@ -217,7 +217,8 @@ def _load_result_image_sync(image_data: bytes, image_name: str = "AI_Result", us
 class ProjectionRenderThread(threading.Thread):
     """Background thread for AI Texture Projection pipeline"""
     
-    def __init__(self, context, api_client, user_prompt, source_path, sim_path, target_objects_data, image_node_name, material_name, do_bake, bypass_api=False, mask_repair_data=None, input_source='COLOR', debug_mode=False, source_image_override=None, cam_data=None):
+    # 1. 在 __init__ 中添加 reference_path 参数
+    def __init__(self, context, api_client, user_prompt, source_path, sim_path, target_objects_data, image_node_name, material_name, do_bake, bypass_api=False, mask_repair_data=None, input_source='COLOR', debug_mode=False, source_image_override=None, cam_data=None, reference_path=None):
         super().__init__(daemon=True)
         self.scene = context.scene
         self.api_client = api_client
@@ -234,8 +235,9 @@ class ProjectionRenderThread(threading.Thread):
         self.debug_mode = debug_mode
         self.source_image_override = source_image_override
         self.cam_data = cam_data
+        self.reference_path = reference_path # Store it!
         self._stop_event = threading.Event()
-        print(f"[GEMINI] ProjectionRenderThread initialized (bypass_api={bypass_api}, input={input_source})")
+        print(f"[GEMINI] Thread init. Reference Path: {self.reference_path}")
     
     def stop(self):
         self._stop_event.set()
@@ -245,51 +247,55 @@ class ProjectionRenderThread(threading.Thread):
         try:
             update_render_status(self.scene, "Sending projection to Gemini...", True)
             
-            from . import operators # I local import to avoid circularity
+            from . import operators 
             
             projection_prompt = f"{self.user_prompt}"
-            
-            # Resolution
             props = self.scene.gemini_render
             resolution = int(props.resolution)
             
-            # DEBUG: Save exact intended AI input
+            # === DEBUG MODE: SAVE ACTUAL INPUTS ===
             if self.debug_mode:
                 try:
                     import shutil
+                    import tempfile
                     blend_path = bpy.data.filepath
                     base_debug_dir = os.path.join(os.path.dirname(blend_path), "textures") if blend_path else os.path.join(tempfile.gettempdir(), "textures")
-                    if os.path.exists(base_debug_dir):
-                        shutil.copy2(self.source_path, os.path.join(base_debug_dir, "input.png"))
-                        print(f"🐞 Debug input confirmed at: {base_debug_dir}")
+                    if not os.path.exists(base_debug_dir):
+                        os.makedirs(base_debug_dir)
+                        
+                    # 1. Save Input (Viewport Capture)
+                    shutil.copy2(self.source_path, os.path.join(base_debug_dir, "debug_input_source.png"))
+                    print(f"🐞 Debug Input saved: {os.path.join(base_debug_dir, 'debug_input_source.png')}")
+                    
+                    # 2. Save Reference (If exists) <--- YOUR REQUEST
+                    if self.reference_path and os.path.exists(self.reference_path):
+                        shutil.copy2(self.reference_path, os.path.join(base_debug_dir, "debug_input_reference.png"))
+                        print(f"🐞 Debug Reference saved: {os.path.join(base_debug_dir, 'debug_input_reference.png')}")
+                    else:
+                        print("🐞 Debug: No reference path found to save.")
+                        
                 except Exception as de:
                     print(f" Debug input sync failed: {de}")
+            # ======================================
 
             if self.source_image_override:
-                print(f"🖼 Direct Image Mode: Using '{self.source_image_override.name}' directly...")
-                # I we need the image data as bytes for the internal loading logic
-                # However, the internal loading logic _load_result_image_sync expects bytes.
-
-                # Let's adjust the _apply_result logic to handle an existing image.
+                print(f"🖼 Direct Image Mode...")
                 image_data = None 
-                mime_type = "image/png" # Dummy
+                mime_type = "image/png"
             elif self.bypass_api:
-                print("🛡 Simulation Mode: Bypassing AI call, using local grid capture...")
-                # I in simulation mode, use the grid capture from sim_path
+                print("🛡 Simulation Mode...")
                 with open(self.sim_path, 'rb') as f:
                     image_data = f.read()
                 mime_type = "image/png"
             else:
-                print(f" Calling AI to generate texture (Input: {self.input_source})...")
+                print(f" Calling AI (Reference: {self.reference_path})...")
                 
-                # Determine if input is color (for AI API)
                 is_color = (self.input_source == 'COLOR')
                 
-                # I send ONLY ONE image to API - 1:1 Mapping
                 image_data, mime_type = self.api_client.generate_image(
                     depth_image_path=self.source_path,
                     user_prompt=projection_prompt,
-                    reference_image_path=None, 
+                    reference_image_path=self.reference_path,
                     is_color_render=is_color,
                     width=resolution,
                     height=resolution
@@ -301,7 +307,7 @@ class ProjectionRenderThread(threading.Thread):
                     blend_path = bpy.data.filepath
                     base_debug_dir = os.path.join(os.path.dirname(blend_path), "textures") if blend_path else os.path.join(tempfile.gettempdir(), "textures")
                     if os.path.exists(base_debug_dir):
-                        res_path = os.path.join(base_debug_dir, "output.png")
+                        res_path = os.path.join(base_debug_dir, "debug_output.png")
                         with open(res_path, 'wb') as f:
                             f.write(image_data)
                         print(f"🐞 Debug output saved to: {res_path}")

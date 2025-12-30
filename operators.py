@@ -737,7 +737,41 @@ class GEMINI_OT_texture_projection(Operator):
 
 
         cam_data = get_current_view_state(context)
-
+        
+        reference_path_for_thread = None
+        if props.use_style_reference and props.style_reference_image:
+            try:
+                print(f" Saving Reference Image for Thread: {props.style_reference_image.name}")
+                ref_img = props.style_reference_image
+                
+                # Create temp file
+                ref_filename = "temp_reference_input.png"
+                reference_path_for_thread = os.path.join(temp_dir, ref_filename)
+                
+                # Save settings logic
+                original_filepath = ref_img.filepath_raw
+                original_format = ref_img.file_format
+                
+                try:
+                    ref_img.filepath_raw = reference_path_for_thread
+                    ref_img.file_format = 'PNG'
+                    ref_img.save()
+                except Exception as e:
+                    print(f" Error saving reference image via .save(): {e}")
+                    # Fallback if image isn't packed/loaded correctly
+                    if ref_img.packed_file:
+                        with open(reference_path_for_thread, 'wb') as f:
+                            f.write(ref_img.packed_file.data)
+                finally:
+                    # Restore original settings so we don't mess up the blend file
+                    ref_img.filepath_raw = original_filepath
+                    ref_img.file_format = original_format
+                    
+                print(f" Reference saved to: {reference_path_for_thread}")
+            except Exception as e:
+                print(f" Failed to process reference image: {e}")
+                reference_path_for_thread = None
+        
         # 4. Start AI Thread
         api_key = props.api_key.strip() or gemini_api.get_api_key()
         api_client = gemini_api.GeminiAPI(api_key, model_name=props.model_name)
@@ -758,7 +792,8 @@ class GEMINI_OT_texture_projection(Operator):
             input_source=props.input_source,
             debug_mode=props.debug_mode,
             source_image_override=source_image_override,
-            cam_data=cam_data
+            cam_data=cam_data,
+            reference_path=reference_path_for_thread
         )
         self.current_thread.start()
         
