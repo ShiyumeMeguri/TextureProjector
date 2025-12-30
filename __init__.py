@@ -4,7 +4,7 @@ bl_info = {
     "category": "3D View", 
     "version": (1, 0, 0),
     "author": "ShiyumeMeguri",
-    "description": "AI-powered texture projection and repair suite. Seamlessly project AI results onto 3D meshes with automated UV management and mask-based inpainting.",
+    "description": "AI-assisted texture projection and repair suite. Seamlessly project AI-generated edits and textures onto 3D meshes with automated UV management.",
     "location": "3D Viewport > N Panel > Gemini",
     "doc_url": "https://github.com/ShiyumeMeguri/TextureProjector",
     "tracker_url": "https://github.com/ShiyumeMeguri/TextureProjector/issues",
@@ -29,6 +29,7 @@ if "bpy" in locals():
         importlib.reload(gemini_api)
     if "threading_utils" in locals():
         importlib.reload(threading_utils)
+    from .threading_utils import BlenderThreadManager, ProjectionRenderThread
     if "image_editor" in locals():
         importlib.reload(image_editor)
     if "image_edit_thread" in locals():
@@ -49,7 +50,7 @@ class NanoBananaPreferences(AddonPreferences):
 
     api_key: StringProperty(
         name="API Key",
-        description="AI API Key for generating stunning renders",
+        description="AI API Key for texture generation and repair",
         default="",
         subtype='PASSWORD',
     )
@@ -85,8 +86,6 @@ core_classes = (
     ui_panel.GeminiRenderProperties,
     ui_panel.BANANA_PT_render_panel,
     ui_panel.BANANA_PT_history_panel,
-    operators.GEMINI_OT_ai_render,
-    operators.GEMINI_OT_stop_render,
     operators.GEMINI_OT_load_history,
     operators.GEMINI_OT_delete_history,
     operators.GEMINI_OT_use_history_prompt,

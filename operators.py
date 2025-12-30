@@ -146,107 +146,7 @@ def restore_view_state(context, history_item):
         print(f"Failed to restore view state: {e}")
         return False
 
-class GEMINI_OT_ai_render(Operator):
-    """I handle the AI Render operation."""
-    bl_idname = "gemini.ai_render"
-    bl_label = "AI Render"
-    bl_description = "Render depth map and send to AI for photorealistic conversion"
-    bl_options = {'REGISTER'}
-    
-    current_thread = None
-    
-    def execute(self, context):
-        """Execute AI render operation"""
-        scene = context.scene
-        props = scene.gemini_render
-        
-        print("Starting AI render operation...")
-        
-        try:
-            if props.is_rendering:
-                print("Previous render still active, resetting...")
-                props.is_rendering = False
-            
-            error = self._validate_inputs(context, props)
-            if error:
-                print(f"Validation error: {error}")
-                self.report({'ERROR'}, error)
-                props.status_text = f"Error: {error}"
-                return {'CANCELLED'}
-            
-            if self.current_thread and self.current_thread.is_alive():
-                print("Stopping previous background thread...")
-                self.current_thread.stop()
-                self.current_thread.join(timeout=2.0)
-            
-            api_key = props.api_key.strip() or gemini_api.get_api_key()
-            if not api_key:
-                error_msg = "No API key found. Set GEMINI_API_KEY environment variable or enter key in UI."
-                print(f"{error_msg}")
-                self.report({'ERROR'}, error_msg)
-                props.status_text = "No API key"
-                return {'CANCELLED'}
-            
-            print(f"API key found, length: {len(api_key)}")
-            print(f"User prompt: '{props.prompt[:50]}...'")
-            
-            depth_renderer = depth_utils.DepthRenderer()
-            api_client = gemini_api.GeminiAPI(api_key, model_name=props.model_name)
-            
-            props.is_rendering = True
-            props.status_text = "Starting AI render..."
-            
-            print("Starting full background thread...")
-            
-            cam_data = get_current_view_state(context)
-            
-            self.current_thread = threading_utils.FullRenderThread(
-                context=context,
-                depth_renderer=depth_renderer,
-                api_client=api_client,
-                user_prompt=props.prompt,
-                cam_data=cam_data
-            )
-            
-            self.current_thread.start()
-            
-            self.report({'INFO'}, "AI render started in background - check Console for progress")
-            print("Background thread started successfully")
-            return {'FINISHED'}
-            
-        except Exception as e:
-            error_msg = f"Failed to start AI render: {str(e)}"
-            print(f"Exception: {error_msg}")
-            print(f"Exception type: {type(e).__name__}")
-            import traceback
-            print(f"Full traceback:\n{traceback.format_exc()}")
-            
-            self.report({'ERROR'}, error_msg)
-            props.is_rendering = False
-            props.status_text = f"Error: {str(e)}"
-            return {'CANCELLED'}
-    
-    def _validate_inputs(self, context, props) -> str:
-        """Validate inputs and return error message if invalid"""
 
-        if not props.prompt.strip():
-            return "Prompt cannot be empty"
-        
-        if len(props.prompt.strip()) < 10:
-            return "Prompt too short (minimum 10 characters)"
-        
-
-        scene = context.scene
-        
-
-        visible_objects = [obj for obj in scene.objects if obj.visible_get() and obj.type == 'MESH']
-        if len(visible_objects) == 0:
-            return "No visible mesh objects found. Add some objects to the scene."
-        
-        # Note: clip values validation removed since normalize_depth was removed
-        
-
-# Note: _validate_projection and bake_projection moved to projection_utils.py
 
 def capture_viewport_to_file(operator, context, scene, props, space_data, region, v_width, v_height, temp_dir, filename, show_wireframe=False, is_depth=False):
     """Refactored helper for viewport/camera capture.
@@ -882,50 +782,7 @@ class GEMINI_OT_texture_projection(Operator):
 
 
 
-class GEMINI_OT_stop_render(Operator):
-    """Stop current AI render operation"""
-    bl_idname = "gemini.stop_render"
-    bl_label = "Stop Render"
-    bl_description = "Stop the current AI render operation"
-    bl_options = {'REGISTER'}
-    
-    def execute(self, context):
-        """Execute stop render operation"""
-        try:
-            print(" Stop render requested...")
-            props = context.scene.gemini_render
-            
-            # I stop background thread if running
-            if hasattr(GEMINI_OT_ai_render, 'current_thread') and GEMINI_OT_ai_render.current_thread:
-                if GEMINI_OT_ai_render.current_thread.is_alive():
-                    print(" Stopping active background thread...")
-                    GEMINI_OT_ai_render.current_thread.stop()
-                    GEMINI_OT_ai_render.current_thread.join(timeout=3.0)
-                    print(" Background thread stopped")
-                else:
-                    print(" Background thread not active, just resetting UI...")
-            else:
-                print(" No background thread found, just resetting UI...")
-            
-            # I always reset UI state
-            props.is_rendering = False
-            props.status_text = " Cancelled by user"
-            
-            self.report({'INFO'}, "AI render stopped - UI reset")
-            print(" UI state reset to normal")
-            return {'FINISHED'}
-            
-        except Exception as e:
-            print(f" Error stopping render: {str(e)}")
-            # I force reset UI even if there was an error
-            try:
-                props = context.scene.gemini_render
-                props.is_rendering = False
-                props.status_text = " Error stopping - reset manually"
-            except:
-                pass
-            self.report({'ERROR'}, f"Failed to stop render: {str(e)}")
-            return {'CANCELLED'}
+
 
 # I additional utility operators
 
@@ -991,11 +848,12 @@ class GEMINI_OT_reset_state(Operator):
             props.status_text = " UI state reset"
             
             # I try to stop any running background threads
-            if hasattr(GEMINI_OT_ai_render, 'current_thread') and GEMINI_OT_ai_render.current_thread:
+            # Check texture_projection thread
+            if hasattr(GEMINI_OT_texture_projection, 'current_thread') and GEMINI_OT_texture_projection.current_thread:
                 try:
-                    GEMINI_OT_ai_render.current_thread.stop()
-                    GEMINI_OT_ai_render.current_thread = None
-                    print(" Force stopped background thread")
+                    GEMINI_OT_texture_projection.current_thread.stop()
+                    GEMINI_OT_texture_projection.current_thread = None
+                    print(" Force stopped projection background thread")
                 except:
                     pass
             

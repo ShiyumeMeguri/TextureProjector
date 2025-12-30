@@ -90,16 +90,7 @@ class GeminiRenderProperties(PropertyGroup):
         default=-1,
     )
     
-    render_mode: EnumProperty(
-        name="Render Mode",
-        description="Choose between depth map (mist) or regular Eevee render",
-        items=[
-            ('DEPTH', "Depth Map (Mist)", "Use mist pass for pure depth information - no textures/lighting needed"),
-            ('EEVEE', "Regular Render", "Use standard Eevee render - preserves colors, textures, and lighting"),
-        ],
-        default='DEPTH',
-        update=lambda self, context: on_render_mode_change(self, context)
-    )
+
     
     resolution: EnumProperty(
         name="Resolution",
@@ -112,44 +103,7 @@ class GeminiRenderProperties(PropertyGroup):
         default='1024',
     )
     
-    mist_start: FloatProperty(
-        name="Mist Start",
-        description="Start distance for mist pass (in meters)",
-        default=5.0,
-        min=0.01,
-        max=1000.0,
-        unit='LENGTH',
-        update=lambda self, context: update_mist_settings(self, context)
-    )
-    
-    mist_depth: FloatProperty(
-        name="Mist Depth", 
-        description="Depth distance for mist pass (in meters)",
-        default=25.0,  # 25m
-        min=0.1,
-        max=1000.0,
-        unit='LENGTH',
-        update=lambda self, context: update_mist_settings(self, context)
-    )
-    
-    mist_falloff: EnumProperty(
-        name="Mist Falloff",
-        description="Mist falloff type - controls how depth gradient transitions",
-        items=[
-            ('LINEAR', "Linear", "Linear depth gradient - smooth and even transition"),
-            ('QUADRATIC', "Quadratic", "Quadratic depth gradient - more contrast in middle range"),
-            ('INVERSE_QUADRATIC', "Inverse Quadratic", "Inverse quadratic - stronger contrast at distance"),
-        ],
-        default='LINEAR',
-        update=lambda self, context: update_mist_settings(self, context)
-    )
-    
-    mist_preview: BoolProperty(
-        name="Preview Mist",
-        description="Show mist effect in 3D viewport for easy depth adjustment",
-        default=False,
-        update=lambda self, context: toggle_mist_preview(self, context)
-    )
+
     
     # I style Reference Image (optional)
     use_style_reference: BoolProperty(
@@ -387,11 +341,7 @@ class BANANA_PT_render_panel(Panel):
         status_icon = 'INFO' if not props.is_rendering else 'TIME'
         box.label(text=props.status_text, icon=status_icon)
         
-        # Stop button if rendering
-        if props.is_rendering:
-            row = layout.row()
-            row.scale_y = 1.2
-            row.operator("gemini.stop_render", text="Stop", icon='CANCEL')
+
 
 
 class BANANA_PT_history_panel(Panel):
@@ -458,92 +408,7 @@ class BANANA_PT_history_panel(Panel):
 
 
 
-def update_mist_settings(self, context):
-    """Update world mist settings when UI values change"""
-    try:
-        import bpy
-        
-        if not context.scene.world:
-            print(" No world in scene for mist settings")
-            return
-        
-        world = context.scene.world
-        
-        # I values are already in meters
-        mist_start_m = self.mist_start
-        mist_depth_m = self.mist_depth
-        mist_falloff = self.mist_falloff if hasattr(self, 'mist_falloff') else 'LINEAR'
-        
-        # I use Blender 4.5+ API if available
-        if hasattr(world, 'mist_settings'):
-            world.mist_settings.use_mist = True
-            world.mist_settings.start = mist_start_m
-            world.mist_settings.depth = mist_depth_m
-            world.mist_settings.falloff = mist_falloff  # I use selected falloff
-            print(f" Mist settings updated: start={mist_start_m}m, depth={mist_depth_m}m, falloff={mist_falloff}")
-        else:
 
-            if hasattr(world, 'use_mist'):
-                world.use_mist = True
-                world.mist_start = mist_start_m
-                world.mist_depth = mist_depth_m
-                world.mist_falloff = mist_falloff  # I use selected falloff
-                print(f" Legacy mist settings updated: start={mist_start_m}m, depth={mist_depth_m}m, falloff={mist_falloff}")
-        
-    except Exception as e:
-        print(f" Failed to update mist settings: {e}")
-
-
-def toggle_mist_preview(self, context):
-    """Toggle mist preview in 3D viewport"""
-    try:
-        import bpy
-        
-        print(f" Toggling mist preview: {self.mist_preview}")
-        
-
-        update_mist_settings(self, context)
-        
-
-        for area in context.screen.areas:
-            if area.type == 'VIEW_3D':
-                for space in area.spaces:
-                    if space.type == 'VIEW_3D':
-                        if self.mist_preview:
-
-                            space.shading.type = 'MATERIAL'
-                            if hasattr(space.shading, 'render_pass'):
-                                space.shading.render_pass = 'MIST'
-                            print(" Mist preview enabled in viewport")
-                        else:
-
-                            if hasattr(space.shading, 'render_pass'):
-                                space.shading.render_pass = 'COMBINED'
-                            space.shading.type = 'MATERIAL'  # I keep material preview
-                            print(" Mist preview disabled in viewport")
-                        
-                        # I force redraw
-                        area.tag_redraw()
-                        return
-        
-        print(" No 3D viewport found for mist preview")
-        
-    except Exception as e:
-        print(f" Failed to toggle mist preview: {e}")
-
-
-def on_render_mode_change(self, context):
-    """Handle render mode change - disable mist preview for Regular Render"""
-    try:
-        import bpy
-        
-
-        if self.render_mode == 'EEVEE' and self.mist_preview:
-            print("Switching to Regular Render - disabling mist preview")
-            self.mist_preview = False  # I this will trigger toggle_mist_preview
-            
-    except Exception as e:
-        print(f"Error in render mode change: {e}")
 
 
 def sync_api_key(self, context):
