@@ -577,42 +577,9 @@ class GEMINI_OT_texture_projection(Operator):
         target_objects_data = []
         
         # I use a consistent material name but create fresh if needed
-        mat_name = "Gemini_Projection_Material"
-        material = bpy.data.materials.get(mat_name)
-        if not material:
-            material = bpy.data.materials.new(name=mat_name)
-            material.use_nodes = True
-        
-        nodes = material.node_tree.nodes
-        links = material.node_tree.links
-        
-        # CLEAR ALL DEFAULT NODES (Especially the Principled BSDF)
-        nodes.clear()
-        
-        # 1. Create Output Node
-        output_node = nodes.new("ShaderNodeOutputMaterial")
-        output_node.location = (400, 0)
-        
-        # 2. Create Emission Node (For shadeless color)
-        emit_node = nodes.new("ShaderNodeEmission")
-        emit_node.location = (200, 0)
-        emit_node.inputs['Strength'].default_value = 1.0
-        
-        # 3. Create Image Texture Node
-        image_node = nodes.new("ShaderNodeTexImage")
-        image_node.name = "Gemini_Image_Node"
-        image_node.location = (0, 0)
-        
-        # 4. Create UV Map Node
-        uv_map_node = nodes.new("ShaderNodeUVMap")
-        uv_map_node.name = "Gemini_UV_Map"
-        uv_map_node.uv_map = "Projected UVs"
-        uv_map_node.location = (-200, 0)
-        
-        # I link them up: UV -> Image -> Emission -> Output
-        links.new(uv_map_node.outputs['UV'], image_node.inputs['Vector'])
-        links.new(image_node.outputs['Color'], emit_node.inputs['Color'])
-        links.new(emit_node.outputs['Emission'], output_node.inputs['Surface'])
+        # Material Setup using Helper
+        material, image_node, uv_map_node = projection_utils.setup_projection_material()
+        mat_name = material.name
         
         import bmesh
         from bpy_extras import view3d_utils, object_utils
@@ -659,17 +626,17 @@ class GEMINI_OT_texture_projection(Operator):
                             uv_layer_name = "Projected UVs"
                             uv_layer = bm_temp.loops.layers.uv.get(uv_layer_name) or bm_temp.loops.layers.uv.new(uv_layer_name)
                             
-                            for face in bm_temp.faces:
-                                face.material_index = 0
-                                for loop in face.loops:
-                                    world_co = temp_obj.matrix_world @ loop.vert.co
-                                    if use_camera_render:
-                                        screen_co = object_utils.world_to_camera_view(scene, scene.camera, world_co)
-                                        uv = (screen_co[0], screen_co[1])
-                                    else:
-                                        screen_co = view3d_utils.location_3d_to_region_2d(region, space_data.region_3d, world_co)
-                                        uv = (screen_co[0]/v_width, screen_co[1]/v_height) if screen_co else (0,0)
-                                    loop[uv_layer].uv = uv
+                            camera_for_proj = scene.camera if use_camera_render else None
+                            projection_utils.project_uvs_on_mesh(
+                                bm=bm_temp, 
+                                obj=temp_obj, 
+                                scene=scene, 
+                                camera=camera_for_proj, 
+                                region=region, 
+                                rv3d=space_data.region_3d, 
+                                v_width=v_width, 
+                                v_height=v_height
+                            )
                                     
                             bmesh.update_edit_mesh(temp_obj.data)
                             bm_copy = bm_temp.copy()
@@ -733,24 +700,22 @@ class GEMINI_OT_texture_projection(Operator):
             uv_layer_name = "Projected UVs"
             uv_layer = bm.loops.layers.uv.get(uv_layer_name) or bm.loops.layers.uv.new(uv_layer_name)
             
-            # I apply to selected faces
-            face_updated = False
+            # Assign material index first (as helper only does UVs)
             for face in bm.faces:
                 if face.select:
                     face.material_index = found_slot
-                    face_updated = True
-                    for loop in face.loops:
-                        world_co = obj.matrix_world @ loop.vert.co
-                        if use_camera_render:
-                            screen_co = object_utils.world_to_camera_view(scene, scene.camera, world_co)
-                            uv = (screen_co[0], screen_co[1])
-                        else:
-                            screen_co = view3d_utils.location_3d_to_region_2d(region, space_data.region_3d, world_co)
-                            if screen_co:
-                                uv = (screen_co[0] / v_width, screen_co[1] / v_height)
-                            else:
-                                uv = (0, 0)
-                        loop[uv_layer].uv = uv
+            
+            camera_for_proj = scene.camera if use_camera_render else None
+            face_updated = projection_utils.project_uvs_on_mesh(
+                bm=bm, 
+                obj=obj, 
+                scene=scene, 
+                camera=camera_for_proj, 
+                region=region, 
+                rv3d=space_data.region_3d, 
+                v_width=v_width, 
+                v_height=v_height
+            )
             
             if face_updated:
                 bmesh.update_edit_mesh(obj.data)
@@ -1722,18 +1687,11 @@ class GEMINI_OT_debug_next(Operator):
                     v_width, v_height = region.width, region.height
                 
                 # I shared Material (Magenta)
-                mat_name = "Gemini_Projection_Material"
-                material = bpy.data.materials.get(mat_name)
-                if not material:
-                    material = bpy.data.materials.new(name=mat_name)
-                    material.use_nodes = True
-                
-                nodes = material.node_tree.nodes
-                nodes.clear()
-                out = nodes.new("ShaderNodeOutputMaterial")
-                emit = nodes.new("ShaderNodeEmission")
-                emit.inputs['Color'].default_value = (1.0, 0.0, 1.0, 1.0) # MAGENTA
-                material.node_tree.links.new(emit.outputs['Emission'], out.inputs['Surface'])
+                # I shared Material (Magenta) - Using Helper
+                material, _, _ = projection_utils.setup_projection_material(
+                    material_name="Gemini_Projection_Material",
+                    emission_color=(1.0, 0.0, 1.0, 1.0) # MAGENTA
+                )
                 
                 if mask_repair_data:
 
@@ -1753,16 +1711,17 @@ class GEMINI_OT_debug_next(Operator):
                          bm = bmesh.from_edit_mesh(temp_obj.data)
                          uv_layer = bm.loops.layers.uv.get("Projected UVs") or bm.loops.layers.uv.new("Projected UVs")
                          
-                         for face in bm.faces:
-                            for loop in face.loops:
-                                world_co = temp_obj.matrix_world @ loop.vert.co
-                                if use_camera_render:
-                                     screen_co = object_utils.world_to_camera_view(scene, scene.camera, world_co)
-                                     uv = (screen_co[0], screen_co[1])
-                                else:
-                                     screen_co = view3d_utils.location_3d_to_region_2d(region, space_data.region_3d, world_co)
-                                     uv = (screen_co[0]/v_width, screen_co[1]/v_height) if screen_co else (0,0)
-                                loop[uv_layer].uv = uv
+                         camera_for_proj = scene.camera if use_camera_render else None
+                         projection_utils.project_uvs_on_mesh(
+                             bm=bm,
+                             obj=temp_obj,
+                             scene=scene,
+                             camera=camera_for_proj,
+                             region=region,
+                             rv3d=space_data.region_3d,
+                             v_width=v_width,
+                             v_height=v_height
+                         )
                          
                          bmesh.update_edit_mesh(temp_obj.data)
                          
@@ -1793,22 +1752,11 @@ class GEMINI_OT_debug_next(Operator):
                 img.name = "Gemini_Projection_Result"
                 
 
-                mat = bpy.data.materials.get("Gemini_Projection_Material")
-                nodes = mat.node_tree.nodes
-                nodes.clear()
-                
-                out = nodes.new("ShaderNodeOutputMaterial")
-                emit = nodes.new("ShaderNodeEmission")
-                tex_node = nodes.new("ShaderNodeTexImage")
-                tex_node.name = "Gemini_Image_Node"
-                tex_node.image = img
-                uv_map = nodes.new("ShaderNodeUVMap")
-                uv_map.uv_map = "Projected UVs"
-                
-                links = mat.node_tree.links
-                links.new(uv_map.outputs['UV'], tex_node.inputs['Vector'])
-                links.new(tex_node.outputs['Color'], emit.inputs['Color'])
-                links.new(emit.outputs['Emission'], out.inputs['Surface'])
+                # Update Material utilizing Helper
+                projection_utils.setup_projection_material(
+                    material_name="Gemini_Projection_Material",
+                    use_image=img
+                )
                 
                 print("4.1 [DEBUG] Material updated with Texture")
                 props.debug_step += 1

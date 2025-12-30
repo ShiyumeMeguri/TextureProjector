@@ -333,3 +333,106 @@ def bake(context, obj, texture_node_name, target_image, src_uv_name="Projected U
         scene.view_settings.view_transform = original_view_transform
         scene.render.bake.use_selected_to_active = original_use_selected_to_active
 
+
+def setup_projection_material(material_name="Gemini_Projection_Material", use_image=None, emission_color=None):
+    """
+    Setup the projection material with emission and optional image texture.
+    
+    Args:
+        material_name: Name of material to create/get
+        use_image: Optional bpy.types.Image to assign to texture node
+        emission_color: Optional (r,g,b,a) for solid color emission (overrides image if active).
+                       If None, defaults to Image texture or White 1.0 strength.
+                       
+    Returns:
+        (material, image_node, uv_map_node)
+    """
+    material = bpy.data.materials.get(material_name)
+    if not material:
+        material = bpy.data.materials.new(name=material_name)
+        material.use_nodes = True
+    
+    nodes = material.node_tree.nodes
+    links = material.node_tree.links
+    nodes.clear()
+    
+    output_node = nodes.new("ShaderNodeOutputMaterial")
+    output_node.location = (400, 0)
+    
+    emit_node = nodes.new("ShaderNodeEmission")
+    emit_node.location = (200, 0)
+    links.new(emit_node.outputs['Emission'], output_node.inputs['Surface'])
+    
+    image_node = None
+    uv_map_node = None
+    
+    if emission_color:
+        # Solid Color Mode (e.g. Debug Magenta)
+        emit_node.inputs['Color'].default_value = emission_color
+        emit_node.inputs['Strength'].default_value = 1.0
+    else:
+        # Texture Mode
+        emit_node.inputs['Strength'].default_value = 1.0
+        
+        image_node = nodes.new("ShaderNodeTexImage")
+        image_node.name = "Gemini_Image_Node"
+        image_node.location = (0, 0)
+        if use_image:
+            image_node.image = use_image
+            
+        uv_map_node = nodes.new("ShaderNodeUVMap")
+        uv_map_node.name = "Gemini_UV_Map"
+        uv_map_node.uv_map = "Projected UVs"
+        uv_map_node.location = (-200, 0)
+        
+        links.new(uv_map_node.outputs['UV'], image_node.inputs['Vector'])
+        links.new(image_node.outputs['Color'], emit_node.inputs['Color'])
+        
+    return material, image_node, uv_map_node
+
+
+def project_uvs_on_mesh(bm, obj, scene, camera=None, region=None, rv3d=None, v_width=1024, v_height=1024, uv_layer_name="Projected UVs"):
+    """
+    Project UVs for selected faces in BMesh based on camera or viewport view.
+    
+    Args:
+        bm: BMesh object (from edit mesh)
+        obj: The object being projected onto
+        scene: Blender scene
+        camera: Camera object (if camera projection)
+        region: View port region (if viewport projection)
+        rv3d: Region 3D View (if viewport projection)
+        v_width: Viewport/Capture width
+        v_height: Viewport/Capture height
+        uv_layer_name: Name of UV layer to write to
+        
+    Returns:
+        True if faces were updated
+    """
+    from bpy_extras import view3d_utils, object_utils
+    
+    uv_layer = bm.loops.layers.uv.get(uv_layer_name) or bm.loops.layers.uv.new(uv_layer_name)
+    
+    face_updated = False
+    for face in bm.faces:
+        if face.select:
+            face_updated = True
+            for loop in face.loops:
+                world_co = obj.matrix_world @ loop.vert.co
+                
+                if camera:
+                    screen_co = object_utils.world_to_camera_view(scene, camera, world_co)
+                    uv = (screen_co[0], screen_co[1])
+                elif region and rv3d:
+                    screen_co = view3d_utils.location_3d_to_region_2d(region, rv3d, world_co)
+                    if screen_co:
+                        uv = (screen_co[0] / v_width, screen_co[1] / v_height)
+                    else:
+                        uv = (0, 0)
+                else:
+                    uv = (0, 0)
+                    
+                loop[uv_layer].uv = uv
+                
+    return face_updated
+
