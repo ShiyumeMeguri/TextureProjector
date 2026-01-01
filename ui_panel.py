@@ -146,6 +146,7 @@ class GeminiRenderProperties(PropertyGroup):
         name="Status",
         description="Current operation status",
         default="Ready to render",
+        options={'SKIP_SAVE'},
     )
     
     is_rendering: BoolProperty(
@@ -215,7 +216,8 @@ class GeminiRenderProperties(PropertyGroup):
     
     debug_step: IntProperty(
         name="Debug Step",
-        default=0
+        default=0,
+        options={'SKIP_SAVE'}
     )
 
 class BANANA_PT_render_panel(Panel):

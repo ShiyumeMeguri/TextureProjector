@@ -1010,6 +1010,7 @@ class GEMINI_OT_reset_state(bpy.types.Operator):
         
         props.is_rendering = False
         props.status_text = "Ready to render"
+        props.debug_step = 0
         
         for area in context.screen.areas:
             if area.type == 'VIEW_3D':
