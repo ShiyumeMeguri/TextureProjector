@@ -295,7 +295,9 @@ class GEMINI_OT_texture_projection(Operator):
             'temp_dir': None,
             'temp_objects': [],
             'temp_materials': [],
-            'target_objects_data': []
+            'target_objects_data': [],
+            'original_active_obj': context.active_object.name if context.active_object else None,
+            'original_selected_objs': [obj.name for obj in context.selected_objects]
         }
         
         # Local cleanup helper for early failures (before thread starts)
@@ -345,6 +347,22 @@ class GEMINI_OT_texture_projection(Operator):
                         shutil.rmtree(registry['temp_dir'], ignore_errors=True)
                         print(f"  ✅ [Local] Removed directory {registry['temp_dir']}")
                 except Exception as e: print(f"  ❌ [Local] Directory cleanup error: {e}")
+
+            # 5. Restore Selection & Activation
+            try:
+                bpy.ops.object.select_all(action='DESELECT')
+                for name in registry.get('original_selected_objs', []):
+                    obj = bpy.data.objects.get(name)
+                    if obj: obj.select_set(True)
+
+                active_name = registry.get('original_active_obj')
+                if active_name:
+                    active_obj = bpy.data.objects.get(active_name)
+                    if active_obj:
+                        bpy.context.view_layer.objects.active = active_obj
+                print("  ✅ [Local] Selection and Activation restored")
+            except Exception as e:
+                print(f"  ❌ [Local] Selection Restoration Error: {e}")
 
         thread_started = False
         try:
@@ -559,7 +577,7 @@ class GEMINI_OT_texture_projection(Operator):
                 if props.debug_mode:
                     blend_path = bpy.data.filepath
                     persistent_dir = os.path.join(os.path.dirname(blend_path), "textures") if blend_path else os.path.join(tempfile.gettempdir(), "textures")
-                    temp_dir = os.path.join(persistent_dir, f"gemini_debug_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}")
+                    temp_dir = os.path.join(persistent_dir, "gemini_debug_session")
                     os.makedirs(temp_dir, exist_ok=True)
                     print(f"🐞 DEBUG MODE: Saving directly to persistent directory: {temp_dir}")
                 else:

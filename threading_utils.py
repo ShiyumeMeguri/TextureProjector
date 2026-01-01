@@ -300,7 +300,7 @@ class ProjectionRenderThread(threading.Thread):
                 # === DEBUG MODE: SAVE AI RESULT ===
                 if self.debug_mode and image_data:
                     try:
-                        result_path = os.path.join(self.temp_dir, "debug_result.png")
+                        result_path = os.path.join(self.temp_dir, "debug_output.png")
                         with open(result_path, 'wb') as f:
                             f.write(image_data)
                         print(f"✅ [DEBUG] AI Result saved to: {result_path}")
@@ -456,14 +456,21 @@ class ProjectionRenderThread(threading.Thread):
                     print(f"  ✅ Deleted material: {mat_name}")
                 except Exception as e: print(f"  ❌ Mat Removal Error: {e}")
 
-            if self.mask_repair_data:
-                try:
-                    bpy.ops.object.select_all(action='DESELECT')
-                    for orig_name in self.mask_repair_data.get('original_object_names', []):
-                        o = bpy.data.objects.get(orig_name)
-                        if o: o.select_set(True)
-                    print("  ✅ Selection restored")
-                except: pass
+            # 5. Restore Selection & Activation
+            try:
+                bpy.ops.object.select_all(action='DESELECT')
+                for name in self.resource_registry.get('original_selected_objs', []):
+                    obj = bpy.data.objects.get(name)
+                    if obj: obj.select_set(True)
+
+                active_name = self.resource_registry.get('original_active_obj')
+                if active_name:
+                    active_obj = bpy.data.objects.get(active_name)
+                    if active_obj:
+                        bpy.context.view_layer.objects.active = active_obj
+                print("  ✅ Selection and Activation restored")
+            except Exception as e:
+                print(f"  ❌ Selection Restoration Error: {e}")
 
         execute_in_main_thread(_cleanup_scene)
 
