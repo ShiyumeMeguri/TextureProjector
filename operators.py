@@ -441,7 +441,11 @@ class GEMINI_OT_texture_projection(Operator):
                 try:
                     props.status_text = "📸 Capturing source..."
                     # Restoring original overlays so masks (if any) are visible in the capture
-                    space_data.overlay.show_overlays = original_show_overlays
+                    # UPDATE: User requests CLEAN capture without selection outlines/grid.
+                    # Since masks are actual objects with Emission materials, they will show up 
+                    # in RENDERED mode even if overlays are OFF.
+                    # so we explicitly turn overlays OFF here.
+                    space_data.overlay.show_overlays = False
                     
                     source_filename = "debug_capture.png" if props.debug_mode else "captured_source.png"
                     source_path = os.path.join(temp_dir, source_filename)
@@ -451,6 +455,7 @@ class GEMINI_OT_texture_projection(Operator):
                         success = capture_viewport_to_file(self, context, scene, props, space_data, region, v_width, v_height, temp_dir, source_filename)
                     else: # DEPTH
                         print(f" Capturing Depth Map Source ({capture_width}x{capture_height})")
+                        # Note: Depth renderer handles its own overlay/shading state usually, but valid to keep overlays off
                         success = capture_viewport_to_file(self, context, scene, props, space_data, region, v_width, v_height, temp_dir, source_filename, is_depth=True)
 
                     if not success:
