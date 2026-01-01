@@ -606,6 +606,22 @@ class GEMINI_OT_texture_projection(Operator):
                 scene.render.resolution_y = capture_height
                 scene.render.resolution_percentage = 100
                 
+                # ======================================================================
+                # VIEWPORT REFERENCE CAPTURE: Capture clean viewport BEFORE masks are added
+                # ======================================================================
+                reference_path_for_thread = None
+                if props.use_style_reference and props.use_viewport_as_reference:
+                    try:
+                        print("📸 Capturing CLEAN VIEWPORT as style reference...")
+                        ref_filename = "debug_reference.png" if props.debug_mode else "viewport_reference.png"
+                        if capture_viewport_to_file(self, context, scene, props, space_data, region, v_width, v_height, temp_dir, ref_filename):
+                            reference_path_for_thread = os.path.join(temp_dir, ref_filename)
+                            print(f" ✅ Viewport reference captured: {reference_path_for_thread}")
+                        else:
+                            print(" ❌ Viewport reference capture failed")
+                    except Exception as ref_error:
+                        print(f" ❌ Viewport reference error: {ref_error}")
+                
                 # Mask Repair setup handled in common block above
                 try:
                     # A. Capture Color (Native Resolution)
@@ -853,10 +869,12 @@ class GEMINI_OT_texture_projection(Operator):
 
             cam_data = get_current_view_state(context)
             
-            reference_path_for_thread = None
-            if props.use_style_reference and props.style_reference_image:
+            # 4. Handle Style Reference Image
+            # I use the already captured 'reference_path_for_thread' if using viewport reference,
+            # otherwise process the manually selected style reference image.
+            if props.use_style_reference and not props.use_viewport_as_reference and props.style_reference_image:
                 try:
-                    print(f" Saving Reference Image for Thread: {props.style_reference_image.name}")
+                    print(f" Saving Selection Reference Image for Thread: {props.style_reference_image.name}")
                     ref_img = props.style_reference_image
                     
                     # Create temp file
@@ -887,7 +905,7 @@ class GEMINI_OT_texture_projection(Operator):
                     print(f" Failed to process reference image: {e}")
                     reference_path_for_thread = None
             
-            # 4. Start AI Thread
+            # 5. Start AI Thread
             api_key = props.api_key.strip() or gemini_api.get_api_key()
             api_client = gemini_api.GeminiAPI(api_key, model_name=props.model_name)
             

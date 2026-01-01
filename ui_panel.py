@@ -128,6 +128,12 @@ class GeminiRenderProperties(PropertyGroup):
         description="Reference image to maintain similar style/materials/lighting"
     )
     
+    use_viewport_as_reference: BoolProperty(
+        name="Use Viewport as Reference",
+        description="Automatically use current viewport screenshot as style reference (ignores mask)",
+        default=False
+    )
+    
     # UI state
     show_settings: BoolProperty(
         name="Show Settings",
@@ -305,9 +311,15 @@ class BANANA_PT_render_panel(Panel):
             style_row = proj_box.row()
             style_row.prop(props, "use_style_reference", text="Use Style Reference")
             if props.use_style_reference:
-                proj_box.prop(props, "style_reference_image", text="Reference")
-                load_row = proj_box.row()
-                load_row.operator("gemini.load_image_as_reference", text="Load Image", icon='FILEBROWSER')
+                # Viewport Reference Option
+                proj_box.prop(props, "use_viewport_as_reference")
+                
+                if not props.use_viewport_as_reference:
+                    proj_box.prop(props, "style_reference_image", text="Reference")
+                    load_row = proj_box.row()
+                    load_row.operator("gemini.load_image_as_reference", text="Load Image", icon='FILEBROWSER')
+                else:
+                    proj_box.label(text="Viewport will be captured as style reference", icon='VIEW_CAMERA')
         elif props.projection_source == 'IMAGE':
             proj_box.prop(props, "projection_image", text="Image")
             if not props.projection_image:
