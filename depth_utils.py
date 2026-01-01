@@ -121,7 +121,8 @@ class DepthRenderer:
                             continue
                             
                         mesh = obj.evaluated_get(depsgraph).to_mesh()
-                        if not mesh:
+                        if not mesh or len(mesh.vertices) == 0 or len(mesh.loop_triangles) == 0:
+                            if mesh: obj.to_mesh_clear()
                             continue
                             
                         mesh.transform(instance.matrix_world)
