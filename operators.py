@@ -1090,32 +1090,60 @@ class GEMINI_OT_load_history(Operator):
             
             # I try to find the AI_Result image in Blender
             image = None
-            if history_item.image_name and history_item.image_name in bpy.data.images:
-                try:
+            if history_item.image_name:
+                if history_item.image_name in bpy.data.images:
                     candidate = bpy.data.images[history_item.image_name]
+                    print(f" Found candidate history image: {candidate.name}")
+                    
                     if candidate.has_data:
                         image = candidate
-                        print(f" Found AI_Result image for loading: {candidate.name}")
+                        print(f" History image has data and is ready for use.")
                     else:
-                        print(f" AI_Result image exists but has no pixel data: {candidate.name} (Was the temporary file deleted or session lost?)")
-                except Exception as e:
-                    print(f" Error finding AI_Result image: {e}")
+                        print(f" ⚠️ History image exists but has NO PIXEL DATA: {candidate.name}")
+                        print(f"   - Is it packed? {candidate.packed_file is not None}")
+                        print(f"   - Users: {candidate.users}")
+                        print(f"   - Source path: {candidate.filepath}")
+                        
+                        # Aggressive Force Load: accessing pixels can sometimes trigger the internal reload from pack
+                        try:
+                            print(f"   - Attempting to force load pixels...")
+                            _ = candidate.pixels[0]
+                            if candidate.has_data:
+                                image = candidate
+                                print(f"   - Success! Forced pixel access restored data.")
+                        except Exception as fe:
+                            print(f"   - Forced pixel access failed: {fe}")
+                        
+                        if not image:
+                            # Fallback 2: try to reload if it has a file path that exists
+                            if candidate.filepath and os.path.exists(bpy.path.abspath(candidate.filepath)):
+                                try:
+                                    print(f"   - Found valid filepath, attempting to reload from disk...")
+                                    candidate.reload()
+                                    if candidate.has_data:
+                                        image = candidate
+                                        print(f"   - Successfully reloaded history image from disk.")
+                                except Exception as re:
+                                    print(f"   - Error during reload fallback: {re}")
+                            else:
+                                print(f"   - No valid filepath to reload from disk.")
+                else:
+                    print(f" ❌ History image name '{history_item.image_name}' not found in bpy.data.images")
+                    # Fallback: maybe it was renamed? (Less likely but possible)
                     pass
             
             if image:
-                
                 # I load as render result
                 from .threading_utils import execute_in_main_thread
                 
                 def _load_from_history():
                     try:
-                        # I use the original AI_Result image directly - no duplication needed
-                        print(f"🖼 Using original AI_Result image for loading: {image.name}")
-                        duplicate_image = image  # I use original, don't create copy
+                        # I use the original AI_Result image directly
+                        print(f"🖼 Using history image: {image.name}")
                         
-                        # I open in new window or existing Image Editor (don't replace Render Result)
+                        # I open in new window or existing Image Editor
                         try:
-                            # I method 1: Create new window with Image Editor
+                            # Method 1: Create new window with Image Editor
                             bpy.ops.wm.window_new()
                             new_window = bpy.context.window_manager.windows[-1]
                             
@@ -1124,36 +1152,36 @@ class GEMINI_OT_load_history(Operator):
                                     area.type = 'IMAGE_EDITOR'
                                     for space in area.spaces:
                                         if space.type == 'IMAGE_EDITOR':
-                                            space.image = duplicate_image
+                                            space.image = image
                                             area.tag_redraw()
-                                            print(f"🖼 Opened AI_Result in new window: {duplicate_image.name}")
+                                            print(f"🖼 Opened in new window: {image.name}")
                                             return
                                     break
                                     
                         except Exception as e:
                             print(f" Could not create new window: {e}")
                             
-                            # I method 2: Use existing Image Editor (but don't replace Render Result)
+                            # Method 2: Use existing Image Editor
                             for area in context.screen.areas:
                                 if area.type == 'IMAGE_EDITOR':
                                     for space in area.spaces:
                                         if space.type == 'IMAGE_EDITOR':
-                                            space.image = duplicate_image
+                                            space.image = image
                                             area.tag_redraw()
-                                            print(f"🖼 Set AI_Result in existing Image Editor: {duplicate_image.name}")
+                                            print(f"🖼 Set in existing Image Editor: {image.name}")
                                             return
                         
-                        print(f" AI_Result image opened: {duplicate_image.name}")
+                        print(f" History image opened: {image.name}")
                     
                     except Exception as e:
                         print(f" Error loading history: {e}")
                 
                 execute_in_main_thread(_load_from_history)
                 
-                self.report({'INFO'}, f"Opened: {image.name}")
+                self.report({'INFO'}, f"Opened history render: {image.name}")
                 return {'FINISHED'}
             else:
-                self.report({'WARNING'}, "History image not found or has no valid data")
+                self.report({'WARNING'}, f"History image '{history_item.image_name}' not found or has no pixel data")
                 return {'CANCELLED'}
                 
         except Exception as e:

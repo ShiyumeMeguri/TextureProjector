@@ -140,9 +140,28 @@ def _load_result_image_sync(image_data: bytes, image_name: str = "AI_Result", us
             if user_prompt:
                 permanent_name = f"AI_Result_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
                 img.name = permanent_name
+                
+                # CRITICAL: Set fake user so Blender doesn't delete it as orphan data
+                img.use_fake_user = True
+                print(f" Marked image as fake user: {permanent_name}")
+                
                 try:
+                    # FORCE LOAD: Access pixels to ensure they are in memory before we delete the file
+                    # This is critical on some systems where pack() might be lazy or slow
+                    _ = img.pixels[0] 
+                    print(f" Forced pixel load for: {permanent_name}")
+                    
                     img.pack()
-                    print(f"History image packed: {permanent_name} (has_data={img.has_data})")
+                    if img.packed_file:
+                        print(f" History image packed successfully: {permanent_name}")
+                    else:
+                        print(f" Warning: History image pack called but packed_file is None: {permanent_name}")
+                    
+                    # Ensure color space is correct for history too
+                    if hasattr(img, 'colorspace_settings'):
+                        img.colorspace_settings.name = 'sRGB'
+                        
+                    print(f" History image state: {permanent_name} (has_data={img.has_data}, users={img.users})")
                 except Exception as pe:
                     print(f" Warning: Failed to pack history image: {pe}")
                 permanent_image_for_history = img
