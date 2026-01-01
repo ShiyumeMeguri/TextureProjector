@@ -5,6 +5,219 @@ import gpu.texture
 from gpu_extras.batch import batch_for_shader
 import mathutils
 import numpy as np
+import os
+import tempfile
+
+# 官方分辨率硬编码像素对齐
+SUPPORTED_RESOLUTIONS = {
+    "1:1":   (1024, 1024),
+    "2:3":   (832, 1248),
+    "3:2":   (1248, 832),
+    "3:4":   (864, 1184),
+    "4:3":   (1184, 864),
+    "4:5":   (896, 1152),
+    "5:4":   (1152, 896),
+    "9:16":  (768, 1344),
+    "16:9":  (1344, 768),
+    "21:9":  (1536, 672),
+}
+
+def snap_to_supported_resolution(res_x, res_y):
+    """
+    Find the closest ratio from SUPPORTED_RESOLUTIONS and return a resolution 
+    that matches that ratio while maintaining the approximate scale.
+    Example: 2048x1999 -> Ratio 1.02 -> 1:1 -> 2048x2048
+    """
+    if res_y == 0: return (1024, 1024)
+    target_ratio = res_x / res_y
+    best_ratio_key = "1:1"
+    min_diff = float('inf')
+    
+    for ratio_name, (w, h) in SUPPORTED_RESOLUTIONS.items():
+        match_ratio = w / h
+        diff = abs(target_ratio - match_ratio)
+        if diff < min_diff:
+            min_diff = diff
+            best_ratio_key = ratio_name
+            
+
+    off_w, off_h = SUPPORTED_RESOLUTIONS[best_ratio_key]
+    
+    # Scale calculation
+    scale = max(res_x / off_w, res_y / off_h)
+    
+    final_w = int(off_w * scale)
+    final_h = int(off_h * scale)
+    
+    # Pixel-perfect alignment: Ensure even numbers for encoders and avoid floating artifacts
+    if final_w % 2 != 0: final_w += 1
+    if final_h % 2 != 0: final_h += 1
+    
+    return (final_w, final_h)
+
+def get_capture_dimensions(context, scene, region):
+    """
+    Consolidated logic to determine capture width and height based on camera or viewport.
+    Includes resolution snapping for camera mode.
+    
+    Returns:
+        (width, height, use_camera_render)
+    """
+    rv3d = context.region_data
+    is_camera_view = (rv3d.view_perspective == 'CAMERA') if rv3d else False
+    has_camera = scene.camera is not None and is_camera_view
+    use_camera_render = has_camera
+
+    if use_camera_render:
+        # CAMERA RESOLUTION ENFORCEMENT (Snapping)
+        best_res = snap_to_supported_resolution(scene.render.resolution_x, scene.render.resolution_y)
+        width, height = best_res
+        print(f"  [UTILS] Camera Mode: Snapped {scene.render.resolution_x}x{scene.render.resolution_y} -> {width}x{height}")
+    else:
+        # Fallback: Viewport
+        width, height = region.width, region.height
+        print(f"  [UTILS] Viewport Mode: {width}x{height}")
+        
+    return width, height, use_camera_render
+
+def setup_temporary_workspace(props):
+    """
+    Common setup for temporary workspace directory.
+    Returns the absolute path to the directory.
+    """
+    if props.debug_mode:
+        blend_path = bpy.data.filepath
+        persistent_dir = os.path.join(os.path.dirname(blend_path), "textures") if blend_path else os.path.join(tempfile.gettempdir(), "textures")
+        temp_dir = os.path.join(persistent_dir, "gemini_debug_session")
+        os.makedirs(temp_dir, exist_ok=True)
+        print(f"  [UTILS] DEBUG MODE: Persistent directory: {temp_dir}")
+    else:
+        temp_dir = tempfile.mkdtemp(prefix="gemini_proj_")
+        print(f"  [UTILS] Created temporary workspace: {temp_dir}")
+        
+    return temp_dir
+
+def setup_mask_repair_meshes(context, props, registry):
+    """
+    Setup mask overlay meshes for selected objects in Edit Mode.
+    Registers temp objects and materials in the provided registry for cleanup.
+    
+    Returns:
+        mask_repair_data dictionary or None if failed
+    """
+    try:
+        print("Mask Repair Mode: Creating mask overlay meshes for selected objects...")
+        
+        mask_repair_data = {
+            'original_textures': {},
+            'original_object_names': [],
+            'temp_to_original': {}
+        }
+        
+        # Process all selected mesh objects
+        for obj in context.selected_objects:
+            if obj.type != 'MESH': continue
+            if obj.mode != 'EDIT':
+                print(f" Skipping {obj.name} - not in Edit Mode")
+                continue
+                
+            obj_name = obj.name
+            print(f"Mask Repair Mode: Processing '{obj_name}'")
+            
+            bm = bmesh.from_edit_mesh(obj.data)
+            
+            # Identify selected faces
+            selected_faces = [f for f in bm.faces if f.select]
+            if not selected_faces:
+                print(f" Mask Repair Mode: No faces selected on '{obj_name}', skipping")
+                continue
+                
+            print(f" Mask Repair Mode: {len(selected_faces)} faces selected on '{obj_name}'")
+            
+            # FACE-AWARE TEXTURE TARGETING
+            target_mat_index = selected_faces[0].material_index
+            original_texture = None
+            
+            if target_mat_index < len(obj.material_slots):
+                slot = obj.material_slots[target_mat_index]
+                if slot.material and slot.material.use_nodes:
+                    for node in slot.material.node_tree.nodes:
+                        if node.type == 'TEX_IMAGE' and node.image:
+                            original_texture = node.image
+                            break
+            
+            if not original_texture:
+                for slot in obj.material_slots:
+                    if slot.material and slot.material.use_nodes:
+                        for node in slot.material.node_tree.nodes:
+                            if node.type == 'TEX_IMAGE' and node.image:
+                                original_texture = node.image
+                                break
+                    if original_texture: break
+            
+            if not original_texture:
+                print(f" ⚠ Warning: Object '{obj_name}' has no textures. Skipping mask for this object.")
+                continue
+
+            bm_copy = bm.copy()
+            faces_to_delete = [f for f in bm_copy.faces if not f.select]
+            bmesh.ops.delete(bm_copy, geom=faces_to_delete, context='FACES')
+            
+            temp_mesh = bpy.data.meshes.new(f"{obj_name}_MaskTemp_Data")
+            bm_copy.to_mesh(temp_mesh)
+            bm_copy.free()
+            
+            temp_obj = bpy.data.objects.new(f"{obj_name}_MaskTemp", temp_mesh)
+            temp_obj.matrix_world = obj.matrix_world.copy()
+            
+            context.collection.objects.link(temp_obj)
+            registry['temp_objects'].append(temp_obj.name)
+            
+            mask_repair_data['original_textures'][obj_name] = original_texture.name
+            mask_repair_data['original_object_names'].append(obj_name)
+            mask_repair_data['temp_to_original'][temp_obj.name] = obj_name
+            
+            # ANTI-ZFIGHTING
+            solidify_mod = temp_obj.modifiers.new(name="Gemini_Solidify", type='SOLIDIFY')
+            solidify_mod.thickness = 0.002
+            solidify_mod.offset = 0
+            solidify_mod.use_rim = True
+            
+            mask_mat_name = f"Gemini_Mask_{obj_name}_Material_Temp"
+            mask_mat = bpy.data.materials.get(mask_mat_name)
+            if mask_mat:
+                bpy.data.materials.remove(mask_mat)
+            mask_mat = bpy.data.materials.new(name=mask_mat_name)
+            mask_mat.use_nodes = True
+            mask_nodes = mask_mat.node_tree.nodes
+            mask_links = mask_mat.node_tree.links
+            mask_nodes.clear()
+            
+            registry['temp_materials'].append(mask_mat_name)
+
+            mask_output = mask_nodes.new("ShaderNodeOutputMaterial")
+            mask_output.location = (300, 0)
+            mask_emit = mask_nodes.new("ShaderNodeEmission")
+            mask_emit.location = (100, 0)
+            mask_emit.inputs['Color'].default_value = (props.mask_color[0], props.mask_color[1], props.mask_color[2], 1.0)
+            mask_emit.inputs['Strength'].default_value = 1.0
+            mask_links.new(mask_emit.outputs['Emission'], mask_output.inputs['Surface'])
+            
+            temp_obj.data.materials.clear()
+            temp_obj.data.materials.append(mask_mat)
+        
+        if not mask_repair_data['original_object_names']:
+            print(" Mask Repair: No valid mask meshes created.")
+            return None
+            
+        print(f"Mask Repair Mode: Created {len(mask_repair_data['original_object_names'])} temp meshes.")
+        return mask_repair_data
+        
+    except Exception as e:
+        print(f" Error in setup_mask_repair_meshes: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 
 def finalize_object_materials(target_obj, target_img, dest_uv_name, search_img=None, node_name=None):

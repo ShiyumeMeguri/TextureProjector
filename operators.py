@@ -21,53 +21,7 @@ from . import depth_utils
 from . import threading_utils
 from . import projection_utils
 
-# 官方分辨率硬编码像素对齐
-SUPPORTED_RESOLUTIONS = {
-    "1:1":   (1024, 1024),
-    "2:3":   (832, 1248),
-    "3:2":   (1248, 832),
-    "3:4":   (864, 1184),
-    "4:3":   (1184, 864),
-    "4:5":   (896, 1152),
-    "5:4":   (1152, 896),
-    "9:16":  (768, 1344),
-    "16:9":  (1344, 768),
-    "21:9":  (1536, 672),
-}
-
-def snap_to_supported_resolution(res_x, res_y):
-    """
-    Find the closest ratio from SUPPORTED_RESOLUTIONS and return a resolution 
-    that matches that ratio while maintaining the approximate scale.
-    Example: 2048x1999 -> Ratio 1.02 -> 1:1 -> 2048x2048
-    """
-    if res_y == 0: return (1024, 1024)
-    target_ratio = res_x / res_y
-    best_ratio_key = "1:1"
-    min_diff = float('inf')
-    
-    for ratio_name, (w, h) in SUPPORTED_RESOLUTIONS.items():
-        match_ratio = w / h
-        diff = abs(target_ratio - match_ratio)
-        if diff < min_diff:
-            min_diff = diff
-            best_ratio_key = ratio_name
-            
-
-    off_w, off_h = SUPPORTED_RESOLUTIONS[best_ratio_key]
-    
-
-    # Example: 2048x1999 and target 1:1 (1024x1024) -> scale = max(2048/1024, 1999/1024) = 2.0
-    scale = max(res_x / off_w, res_y / off_h)
-    
-    final_w = int(off_w * scale)
-    final_h = int(off_h * scale)
-    
-    # Pixel-perfect alignment: Ensure even numbers for encoders and avoid floating artifacts
-    if final_w % 2 != 0: final_w += 1
-    if final_h % 2 != 0: final_h += 1
-    
-    return (final_w, final_h)
+# Resolution constants and snapping logic moved to projection_utils.py
 
 # === DEBUG STORAGE ===
 _debug_storage = {
@@ -244,8 +198,8 @@ def capture_viewport_to_file(operator, context, scene, props, space_data, region
             scene.render.image_settings.file_format = 'PNG'
             
 
-            # view_context=True ensures it respects the current camera/viewport state
-            bpy.ops.render.opengl(write_still=True, view_context=True)
+            # Use view_context=False in camera mode to respect render resolution settings
+            bpy.ops.render.opengl(write_still=True, view_context=not has_camera)
             
 
             space_data.shading.type = original_shading_type
@@ -370,6 +324,10 @@ class GEMINI_OT_texture_projection(Operator):
             props.status_text = "Processing..."
             props.is_rendering = True
             
+            # I backup original render settings for restoration in finally block
+            render_filepath = scene.render.filepath
+            render_format = scene.render.image_settings.file_format
+            
             # I check if already rendering
             if GEMINI_OT_texture_projection.current_thread and GEMINI_OT_texture_projection.current_thread.is_alive():
                  self.report({'WARNING'}, "A projection process is already running.")
@@ -382,194 +340,86 @@ class GEMINI_OT_texture_projection(Operator):
                 self.report({'ERROR'}, str(e))
                 return {'CANCELLED'}
 
-            original_active_uvs = {}
-            for obj in context.selected_objects:
-                if obj.type == 'MESH' and obj.data.uv_layers.active:
-                    original_active_uvs[obj.name] = obj.data.uv_layers.active.name
-                    print(f"Target UV for {obj.name}: {original_active_uvs[obj.name]}")
-
+            # Define core variables early
             viewport_area = next((a for a in context.screen.areas if a.type == 'VIEW_3D'), None)
             if not viewport_area:
                 self.report({'ERROR'}, "No 3D Viewport found")
                 return {'CANCELLED'}
             region = viewport_area.regions[-1]
             space_data = next(s for s in viewport_area.spaces if s.type == 'VIEW_3D')
-            
-            # ======================================================================
-            # CAMERA PRIORITY: If camera exists, use camera render + camera resolution
-            # I this ensures pixel-perfect UV alignment (world_to_camera_view matches render)
-            # ======================================================================
-            rv3d = context.region_data
-            is_camera_view = (rv3d.view_perspective == 'CAMERA') if rv3d else False
-            has_camera = scene.camera is not None and is_camera_view
-            use_camera_render = has_camera  # I use camera render when camera view is active
-            
-            if use_camera_render:
-                # ======================================================================
-                # CAMERA RESOLUTION ENFORCEMENT:
-                # I force camera resolution to nearest SUPPORTED_RESOLUTIONS entry
-                # ======================================================================
-                best_res = snap_to_supported_resolution(scene.render.resolution_x, scene.render.resolution_y)
-                print(f" Resolution Snap: {scene.render.resolution_x}x{scene.render.resolution_y} -> {best_res[0]}x{best_res[1]}")
-                
-                # I application of resolution involves updating 'capture_width/height'
-                # and later forcing scene.render.resolution_x/y in the capture block.
-                capture_width = best_res[0]
-                capture_height = best_res[1]
-                print(f" CAMERA MODE: Using snapped resolution {capture_width}x{capture_height}")
-                print(f" Camera type: {'ORTHO' if scene.camera.data.type == 'ORTHO' else 'PERSP'}")
-            else:
-                # Fallback: Use viewport dimensions
-                capture_width, capture_height = region.width, region.height
-                print(f" VIEWPORT MODE: Using viewport resolution {capture_width}x{capture_height}")
-            
-            # UV projection dimensions (CRITICAL: must match capture resolution for pixel alignment)
-            v_width, v_height = capture_width, capture_height
 
-
+            # PHASE 1: Capture Resolution and Workspace Setup
+            # I acquisition of view dimensions and dimensions setup
+            v_width, v_height, use_camera_render = projection_utils.get_capture_dimensions(context, scene, region)
+            capture_width, capture_height = v_width, v_height
+            
+            # Workspace setup
+            temp_dir = projection_utils.setup_temporary_workspace(props)
+            registry['temp_dir'] = temp_dir
+            
+            # I backup original scene and render settings for restoration in finally block
             render_filepath = scene.render.filepath
             render_format = scene.render.image_settings.file_format
-            original_show_overlays = space_data.overlay.show_overlays
-            original_shading_type = space_data.shading.type
-            
-            # I resolution management for consistent capture
             original_res_x = scene.render.resolution_x
             original_res_y = scene.render.resolution_y
             original_res_pct = scene.render.resolution_percentage
             
-            # ======================================================================
-            # MASK REPAIR SETUP: Create temp mask mesh WITHOUT affecting original object state
-            # I this is now common to all projection sources (AI and Custom Image)
-            # ======================================================================
+            # Backups for 3D View state
+            original_show_overlays = space_data.overlay.show_overlays
+            original_shading_type = space_data.shading.type
+            
+            # I record original active UV layers for all selected mesh objects
+            # This is critical for restoration and correct destination UV lookup during baking
+            original_active_uvs = {}
+            for obj in context.selected_objects:
+                if obj.type == 'MESH' and obj.data.uv_layers.active:
+                    original_active_uvs[obj.name] = obj.data.uv_layers.active.name
+            
+            # MANDATORY: Set global resolution BEFORE any captures (including Reference)
+            scene.render.resolution_x = capture_width
+            scene.render.resolution_y = capture_height
+            scene.render.resolution_percentage = 100
+            scene.render.image_settings.file_format = 'PNG'
+            
+            # PHASE 1: Capture Resolution and Workspace Setup
+            
+            # PHASE 2: Viewport Reference Capture (BEFORE Masks)
+            # Capture clean viewport BEFORE mask overlays are added for best style matching
+            reference_path_for_thread = None
+            if props.use_style_reference and props.use_viewport_as_reference:
+                try:
+                    print("📸 Capturing CLEAN VIEWPORT as style reference...")
+                    ref_filename = "debug_reference.png" if props.debug_mode else "viewport_reference.png"
+                    
+                    # Temporarily hide overlays for a clean reference capture
+                    original_overlay_state = space_data.overlay.show_overlays
+                    space_data.overlay.show_overlays = False
+                    
+                    if capture_viewport_to_file(self, context, scene, props, space_data, region, v_width, v_height, temp_dir, ref_filename):
+                        reference_path_for_thread = os.path.join(temp_dir, ref_filename)
+                        print(f" ✅ Viewport reference captured: {reference_path_for_thread}")
+                    else:
+                        print(" ❌ Viewport reference capture failed")
+                        
+                    space_data.overlay.show_overlays = original_overlay_state
+                except Exception as ref_error:
+                    print(f" ❌ Viewport reference error: {ref_error}")
+
+            # PHASE 3: Mask Setup (AFTER Reference Capture)
             mask_repair_data = None
             if props.mask_repair_mode:
-                try:
-                    print("Mask Repair Mode: Creating mask overlay meshes for selected objects...")
-                    
-                    mask_repair_data = {
-                        'original_textures': {},
-                        'original_object_names': [],
-                        'temp_to_original': {}
-                    }
-                    
-                    # Process all selected mesh objects
-                    for obj in context.selected_objects:
-                        if obj.type != 'MESH': continue
-                        if obj.mode != 'EDIT':
-                            print(f" Skipping {obj.name} - not in Edit Mode")
-                            continue
-                            
-                        obj_name = obj.name
-                        print(f"Mask Repair Mode: Processing '{obj_name}'")
-                        
-                        import bmesh
-                        bm = bmesh.from_edit_mesh(obj.data)
-                        
-                        # Identify selected faces
-                        selected_faces = [f for f in bm.faces if f.select]
-                        if not selected_faces:
-                            print(f" Mask Repair Mode: No faces selected on '{obj_name}', skipping")
-                            continue
-                            
-                        print(f" Mask Repair Mode: {len(selected_faces)} faces selected on '{obj_name}'")
-                        
-                        # FACE-AWARE TEXTURE TARGETING
-                        target_mat_index = selected_faces[0].material_index
-                        original_texture = None
-                        
-                        if target_mat_index < len(obj.material_slots):
-                            slot = obj.material_slots[target_mat_index]
-                            if slot.material and slot.material.use_nodes:
-                                for node in slot.material.node_tree.nodes:
-                                    if node.type == 'TEX_IMAGE' and node.image:
-                                        original_texture = node.image
-                                        break
-                        
-                        if not original_texture:
-                            for slot in obj.material_slots:
-                                if slot.material and slot.material.use_nodes:
-                                    for node in slot.material.node_tree.nodes:
-                                        if node.type == 'TEX_IMAGE' and node.image:
-                                            original_texture = node.image
-                                            break
-                                if original_texture: break
-                        
-                        if not original_texture:
-                            print(f" ⚠ Warning: Object '{obj_name}' has no textures. Skipping mask for this object.")
-                            continue
-
-                        bm_copy = bm.copy()
-                        faces_to_delete = [f for f in bm_copy.faces if not f.select]
-                        bmesh.ops.delete(bm_copy, geom=faces_to_delete, context='FACES')
-                        
-                        temp_mesh = bpy.data.meshes.new(f"{obj_name}_MaskTemp_Data")
-                        bm_copy.to_mesh(temp_mesh)
-                        bm_copy.free()
-                        
-                        temp_obj = bpy.data.objects.new(f"{obj_name}_MaskTemp", temp_mesh)
-                        temp_obj.matrix_world = obj.matrix_world.copy()
-                        
-                        context.collection.objects.link(temp_obj)
-                        registry['temp_objects'].append(temp_obj.name)
-                        
-                        mask_repair_data['original_textures'][obj_name] = original_texture.name
-                        mask_repair_data['original_object_names'].append(obj_name)
-                        mask_repair_data['temp_to_original'][temp_obj.name] = obj_name
-                        
-                        # ANTI-ZFIGHTING
-                        solidify_mod = temp_obj.modifiers.new(name="Gemini_Solidify", type='SOLIDIFY')
-                        solidify_mod.thickness = 0.002
-                        solidify_mod.offset = 0
-                        solidify_mod.use_rim = True
-                        
-                        mask_mat_name = f"Gemini_Mask_{obj_name}_Material_Temp"
-                        mask_mat = bpy.data.materials.get(mask_mat_name)
-                        if mask_mat:
-                            bpy.data.materials.remove(mask_mat)
-                        mask_mat = bpy.data.materials.new(name=mask_mat_name)
-                        mask_mat.use_nodes = True
-                        mask_nodes = mask_mat.node_tree.nodes
-                        mask_links = mask_mat.node_tree.links
-                        mask_nodes.clear()
-                        
-                        registry['temp_materials'].append(mask_mat_name)
-
-                        mask_output = mask_nodes.new("ShaderNodeOutputMaterial")
-                        mask_output.location = (300, 0)
-                        mask_emit = mask_nodes.new("ShaderNodeEmission")
-                        mask_emit.location = (100, 0)
-                        mask_emit.inputs['Color'].default_value = (props.mask_color[0], props.mask_color[1], props.mask_color[2], 1.0)
-                        mask_emit.inputs['Strength'].default_value = 1.0
-                        mask_links.new(mask_emit.outputs['Emission'], mask_output.inputs['Surface'])
-                        
-                        temp_obj.data.materials.clear()
-                        temp_obj.data.materials.append(mask_mat)
-                    
-                    if not mask_repair_data['original_object_names']:
-                        raise Exception("Mask Repair requires at least one object with selected faces and a texture.")
-                        
-                    print(f"Mask Repair Mode: Created {len(mask_repair_data['original_object_names'])} temp meshes.")
-                    
-                except Exception as mask_error:
-                    print(f" Mask Repair Mode setup error: {mask_error}")
-                    import traceback
-                    traceback.print_exc()
-                    self.report({'ERROR'}, f"Mask Repair Setup Failed: {mask_error}. Aborting.")
+                mask_repair_data = projection_utils.setup_mask_repair_meshes(context, props, registry)
+                if not mask_repair_data:
+                    self.report({'ERROR'}, "Mask Repair Setup Failed. Check console for details.")
                     return {'CANCELLED'}
-                    
-                except Exception as mask_error:
-                    print(f" Mask Repair Mode setup error: {mask_error}")
-                    import traceback
-                    traceback.print_exc()
-                    self.report({'ERROR'}, f"Mask Repair Setup Failed: {mask_error}. Aborting.")
-                    return {'CANCELLED'}
+
+            # (Overlays and shading already backed up above)
 
             # 2. Logic Branching based on Projection Source
             # Determine which image to project
             source_path = ""
             sim_path = ""
             bypass_api = False
-            temp_dir = None
 
             if props.projection_source == 'IMAGE':
                 source_image_override = props.projection_image
@@ -584,73 +434,29 @@ class GEMINI_OT_texture_projection(Operator):
                 print(f"🖼 Projection: Custom Image '{source_image_override.name}'")
             else:
                 source_image_override = None
-                # I directory for workspace
-                if props.debug_mode:
-                    blend_path = bpy.data.filepath
-                    persistent_dir = os.path.join(os.path.dirname(blend_path), "textures") if blend_path else os.path.join(tempfile.gettempdir(), "textures")
-                    temp_dir = os.path.join(persistent_dir, "gemini_debug_session")
-                    os.makedirs(temp_dir, exist_ok=True)
-                    print(f"🐞 DEBUG MODE: Saving directly to persistent directory: {temp_dir}")
-                else:
-                    temp_dir = tempfile.mkdtemp(prefix="gemini_proj_")
-                    print(f"📁 Created temporary workspace: {temp_dir}")
-
-                registry['temp_dir'] = temp_dir # REGISTER TEMP DIR
                 source_path = os.path.join(temp_dir, "captured_input.png")
                 
-                # I configure for capture
-                space_data.overlay.show_overlays = False
-                scene.render.image_settings.file_format = 'PNG'
-                
-                scene.render.resolution_x = capture_width
-                scene.render.resolution_y = capture_height
-                scene.render.resolution_percentage = 100
-                
-                # ======================================================================
-                # VIEWPORT REFERENCE CAPTURE: Capture clean viewport BEFORE masks are added
-                # ======================================================================
-                reference_path_for_thread = None
-                if props.use_style_reference and props.use_viewport_as_reference:
-                    try:
-                        print("📸 Capturing CLEAN VIEWPORT as style reference...")
-                        ref_filename = "debug_reference.png" if props.debug_mode else "viewport_reference.png"
-                        if capture_viewport_to_file(self, context, scene, props, space_data, region, v_width, v_height, temp_dir, ref_filename):
-                            reference_path_for_thread = os.path.join(temp_dir, ref_filename)
-                            print(f" ✅ Viewport reference captured: {reference_path_for_thread}")
-                        else:
-                            print(" ❌ Viewport reference capture failed")
-                    except Exception as ref_error:
-                        print(f" ❌ Viewport reference error: {ref_error}")
-                
-                # Mask Repair setup handled in common block above
+                # PHASE 4: Source Capture (with Masks)
+                # This capture sees whatever state the viewport is in (including mask overlays if active)
                 try:
-                    # A. Capture Color (Native Resolution)
-                    # I forced Resolution Application (for Camera Render)
-                    if use_camera_render:
-                        scene.render.resolution_x = capture_width
-                        scene.render.resolution_y = capture_height
-                        scene.render.resolution_percentage = 100
+                    props.status_text = "📸 Capturing source..."
+                    # Restoring original overlays so masks (if any) are visible in the capture
+                    space_data.overlay.show_overlays = original_show_overlays
                     
-                    print(f"📸 Capturing viewport color ({capture_width}x{capture_height})...")
-                    props.status_text = "📸 Capturing viewport..."
-                    
-                    # D. Determine Capture Requirements & Execute
-                    # Anti-redundancy with meaningful debug:
-                    # 1. Capture the INTENDED AI SOURCE
                     source_filename = "debug_capture.png" if props.debug_mode else "captured_source.png"
                     source_path = os.path.join(temp_dir, source_filename)
                     
                     if props.input_source == 'COLOR':
-                        print("🎨 Capturing Color Viewport (Input Source)")
+                        print(f"🎨 Capturing Color Viewport Source ({capture_width}x{capture_height})")
                         success = capture_viewport_to_file(self, context, scene, props, space_data, region, v_width, v_height, temp_dir, source_filename)
                     else: # DEPTH
-                        print(" Capturing Depth Map (Input Source)")
+                        print(f" Capturing Depth Map Source ({capture_width}x{capture_height})")
                         success = capture_viewport_to_file(self, context, scene, props, space_data, region, v_width, v_height, temp_dir, source_filename, is_depth=True)
 
                     if not success:
                         raise Exception("Primary viewport capture failed")
 
-                    # 2. Handle Projection Source
+                    # Handle Non-AI Projection Sources (VIEW/GRID)
                     sim_path = ""
                     bypass_api = (props.projection_source != 'AI')
                     
@@ -669,10 +475,6 @@ class GEMINI_OT_texture_projection(Operator):
                         print("⚒ Capturing Wireframe Grid (Projection: Grid)")
                         if not capture_viewport_to_file(self, context, scene, props, space_data, region, v_width, v_height, temp_dir, sim_filename, show_wireframe=True):
                             raise Exception("Grid capture failed")
-                    elif props.projection_source == 'IMAGE':
-                        # Custom projection image - handled above
-                        pass
-                    # AI projection handled in thread
 
                 except Exception as capture_error:
                     print(f" Capture Error: {capture_error}")
@@ -1763,19 +1565,41 @@ class GEMINI_OT_debug_next(Operator):
             
             # STEP 0: Capture & Init
             if step == 0:
-                print("1 [DEBUG] Starting Capture Phase...")
+                # PHASE 1: Capture Resolution and Workspace Setup
+                v_width, v_height, use_camera = projection_utils.get_capture_dimensions(context, scene, region)
+                capture_width, capture_height = v_width, v_height
                 
-
-                if 'target_objects_data' in _debug_storage: del _debug_storage['target_objects_data']
-                if 'mask_repair_data' in _debug_storage: del _debug_storage['mask_repair_data']
-                _debug_storage['target_objects_data'] = []
-                _debug_storage['mask_repair_data'] = None
-                
-                # I temp Dir
-                temp_dir = tempfile.mkdtemp(prefix="gemini_debug_")
+                # Workspace setup
+                temp_dir = projection_utils.setup_temporary_workspace(props)
                 _debug_storage['temp_dir'] = temp_dir
-                init_img_path = os.path.join(temp_dir, "init.png")
-                _debug_storage['init_img_path'] = init_img_path
+                
+                # MANDATORY: Set global resolution
+                scene.render.resolution_x = capture_width
+                scene.render.resolution_y = capture_height
+                scene.render.resolution_percentage = 100
+                scene.render.image_settings.file_format = 'PNG'
+                
+                # PHASE 2: Viewport Reference Capture (BEFORE Masks)
+                if props.use_style_reference and props.use_viewport_as_reference:
+                    ref_filename = "debug_reference.png"
+                    print("📸 [DEBUG] Capturing CLEAN reference...")
+                    original_overlay = space_data.overlay.show_overlays
+                    space_data.overlay.show_overlays = False
+                    capture_viewport_to_file(self, context, scene, props, space_data, region, v_width, v_height, temp_dir, ref_filename)
+                    space_data.overlay.show_overlays = original_overlay
+                
+                # Main capture
+                file_name = "debug_capture.png"
+                space_data.overlay.show_overlays = False # Hide UI for capture
+                
+                if capture_viewport_to_file(self, context, scene, props, space_data, region, v_width, v_height, temp_dir, file_name):
+                    _debug_storage['init_img_path'] = os.path.join(temp_dir, file_name)
+                    print(f"1.2 [DEBUG] Main Capture Complete: {_debug_storage['init_img_path']}")
+                
+                props.debug_step += 1
+                return # Skip old logic
+                
+                
                 
 
                 viewport_area = next((a for a in context.screen.areas if a.type == 'VIEW_3D'), None)
@@ -1909,7 +1733,8 @@ class GEMINI_OT_debug_next(Operator):
                 
                 if use_camera_render:
                     # I use snapped scene render resolution (matches camera render)
-                    v_width, v_height = snap_to_supported_resolution(scene.render.resolution_x, scene.render.resolution_y)
+                    res = projection_utils.snap_to_supported_resolution(scene.render.resolution_x, scene.render.resolution_y)
+                    v_width, v_height = res
                 else:
                     # Fallback: viewport dimensions
                     v_width, v_height = region.width, region.height
