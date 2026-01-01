@@ -97,6 +97,7 @@ core_classes = (
     operators.GEMINI_OT_load_image_as_reference,
     operators.GEMINI_OT_load_example_reference,
     operators.GEMINI_OT_texture_projection,
+    operators.GEMINI_OT_stop_render,
     operators.GEMINI_OT_open_api_key_url,
     operators.GEMINI_OT_validate_api_key,
 )
@@ -143,6 +144,20 @@ def register():
         description="Index for history context menu",
         default=0
     )
+    
+    # Register load handler to reset status
+    from bpy.app.handlers import load_post
+    if _reset_is_rendering not in load_post:
+        load_post.append(_reset_is_rendering)
+
+def _reset_is_rendering(dummy1=None, dummy2=None):
+    """Reset rendering status on load to prevent infinite 'Processing' state"""
+    import bpy
+    for scene in bpy.data.scenes:
+        if hasattr(scene, 'gemini_render'):
+            scene.gemini_render.is_rendering = False
+            scene.gemini_render.status_text = "Ready to render"
+    print(" [GEMINI] Reset rendering status on file load")
 
 def unregister():
     # I stop any background threads
@@ -167,6 +182,11 @@ def unregister():
     # I remove properties from window manager
     if hasattr(bpy.types.WindowManager, 'history_menu_index'):
         del bpy.types.WindowManager.history_menu_index
+        
+    # Remove load handler
+    from bpy.app.handlers import load_post
+    if _reset_is_rendering in load_post:
+        load_post.remove(_reset_is_rendering)
 
 if __name__ == "__main__":
     register()

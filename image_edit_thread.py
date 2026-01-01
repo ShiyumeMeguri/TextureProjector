@@ -117,6 +117,9 @@ class ImageEditThread(threading.Thread):
             self._update_status(f"Error: {error_msg[:50]}")
         
         finally:
+            # Clean up temporary files
+            self._cleanup_temp_files()
+            
             # Reset editing flag
             def reset_flag():
                 props = bpy.context.window_manager.nano_banana_editor
@@ -225,9 +228,14 @@ class ImageEditThread(threading.Thread):
     def _cleanup_temp_files(self):
         """Clean up temporary files"""
         try:
-            if os.path.exists(self.temp_dir):
-                shutil.rmtree(self.temp_dir)
-                print(f"[NANO BANANA] Cleaned up temp directory: {self.temp_dir}")
+            if self.temp_dir and os.path.exists(self.temp_dir):
+                # SAFETY GUARD: Only delete if it's our specific subfolder
+                folder_name = os.path.basename(self.temp_dir)
+                if folder_name.startswith("nano_banana_edit_"):
+                    shutil.rmtree(self.temp_dir)
+                    print(f"[NANO BANANA] Cleaned up temp directory: {self.temp_dir}")
+                else:
+                    print(f"[NANO BANANA] [SAFETY] Cleanup skipped: {self.temp_dir} does not match prefix.")
         except Exception as e:
             print(f"[NANO BANANA] Warning: Could not cleanup temp files: {e}")
     

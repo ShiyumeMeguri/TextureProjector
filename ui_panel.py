@@ -152,6 +152,7 @@ class GeminiRenderProperties(PropertyGroup):
         name="Is Rendering",
         description="Whether AI render is in progress",
         default=False,
+        options={'SKIP_SAVE'},
     )
     # Projection settings
     input_source: EnumProperty(
@@ -315,8 +316,8 @@ class BANANA_PT_render_panel(Panel):
         proj_col.scale_y = 2.0
         
         if props.is_rendering:
-            proj_col.enabled = False
-            proj_col.operator("gemini.texture_projection", text="Processing...", icon='RENDER_ANIMATION')
+            # Keep enabled so user can stop
+            proj_col.operator("gemini.stop_render", text="Stop Processing...", icon='CANCEL')
         else:
             btn_text = "Project Texture"
             if props.projection_source == 'AI':
