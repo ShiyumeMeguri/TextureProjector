@@ -438,153 +438,11 @@ class GEMINI_OT_texture_projection(Operator):
             original_res_pct = scene.render.resolution_percentage
             
             # ======================================================================
-            # MASK REPAIR SETUP: Create temp mask mesh WITHOUT affecting original object state
-            # I this is now common to all projection sources (AI and Custom Image)
+            # 1. INITIALIZATION: Setup workspace and captures
+            # I must do this BEFORE any mesh modifications (like Masks)
             # ======================================================================
-            mask_repair_data = None
-            if props.mask_repair_mode:
-                try:
-                    print("Mask Repair Mode: Creating mask overlay meshes for selected objects...")
-                    
-                    mask_repair_data = {
-                        'original_textures': {},
-                        'original_object_names': [],
-                        'temp_to_original': {}
-                    }
-                    
-                    # Process all selected mesh objects
-                    for obj in context.selected_objects:
-                        if obj.type != 'MESH': continue
-                        if obj.mode != 'EDIT':
-                            print(f" Skipping {obj.name} - not in Edit Mode")
-                            continue
-                            
-                        obj_name = obj.name
-                        print(f"Mask Repair Mode: Processing '{obj_name}'")
-                        
-                        import bmesh
-                        bm = bmesh.from_edit_mesh(obj.data)
-                        
-                        # Identify selected faces
-                        selected_faces = [f for f in bm.faces if f.select]
-                        if not selected_faces:
-                            print(f" Mask Repair Mode: No faces selected on '{obj_name}', skipping")
-                            continue
-                            
-                        print(f" Mask Repair Mode: {len(selected_faces)} faces selected on '{obj_name}'")
-                        
-                        # FACE-AWARE TEXTURE TARGETING
-                        target_mat_index = selected_faces[0].material_index
-                        original_texture = None
-                        
-                        if target_mat_index < len(obj.material_slots):
-                            slot = obj.material_slots[target_mat_index]
-                            if slot.material and slot.material.use_nodes:
-                                for node in slot.material.node_tree.nodes:
-                                    if node.type == 'TEX_IMAGE' and node.image:
-                                        original_texture = node.image
-                                        break
-                        
-                        if not original_texture:
-                            for slot in obj.material_slots:
-                                if slot.material and slot.material.use_nodes:
-                                    for node in slot.material.node_tree.nodes:
-                                        if node.type == 'TEX_IMAGE' and node.image:
-                                            original_texture = node.image
-                                            break
-                                if original_texture: break
-                        
-                        if not original_texture:
-                            print(f" ⚠ Warning: Object '{obj_name}' has no textures. Skipping mask for this object.")
-                            continue
-
-                        bm_copy = bm.copy()
-                        faces_to_delete = [f for f in bm_copy.faces if not f.select]
-                        bmesh.ops.delete(bm_copy, geom=faces_to_delete, context='FACES')
-                        
-                        temp_mesh = bpy.data.meshes.new(f"{obj_name}_MaskTemp_Data")
-                        bm_copy.to_mesh(temp_mesh)
-                        bm_copy.free()
-                        
-                        temp_obj = bpy.data.objects.new(f"{obj_name}_MaskTemp", temp_mesh)
-                        temp_obj.matrix_world = obj.matrix_world.copy()
-                        
-                        context.collection.objects.link(temp_obj)
-                        registry['temp_objects'].append(temp_obj.name)
-                        
-                        mask_repair_data['original_textures'][obj_name] = original_texture.name
-                        mask_repair_data['original_object_names'].append(obj_name)
-                        mask_repair_data['temp_to_original'][temp_obj.name] = obj_name
-                        
-                        # ANTI-ZFIGHTING
-                        solidify_mod = temp_obj.modifiers.new(name="Gemini_Solidify", type='SOLIDIFY')
-                        solidify_mod.thickness = 0.002
-                        solidify_mod.offset = 0
-                        solidify_mod.use_rim = True
-                        
-                        mask_mat_name = f"Gemini_Mask_{obj_name}_Material_Temp"
-                        mask_mat = bpy.data.materials.get(mask_mat_name)
-                        if mask_mat:
-                            bpy.data.materials.remove(mask_mat)
-                        mask_mat = bpy.data.materials.new(name=mask_mat_name)
-                        mask_mat.use_nodes = True
-                        mask_nodes = mask_mat.node_tree.nodes
-                        mask_links = mask_mat.node_tree.links
-                        mask_nodes.clear()
-                        
-                        registry['temp_materials'].append(mask_mat_name)
-
-                        mask_output = mask_nodes.new("ShaderNodeOutputMaterial")
-                        mask_output.location = (300, 0)
-                        mask_emit = mask_nodes.new("ShaderNodeEmission")
-                        mask_emit.location = (100, 0)
-                        mask_emit.inputs['Color'].default_value = (props.mask_color[0], props.mask_color[1], props.mask_color[2], 1.0)
-                        mask_emit.inputs['Strength'].default_value = 1.0
-                        mask_links.new(mask_emit.outputs['Emission'], mask_output.inputs['Surface'])
-                        
-                        temp_obj.data.materials.clear()
-                        temp_obj.data.materials.append(mask_mat)
-                    
-                    if not mask_repair_data['original_object_names']:
-                        raise Exception("Mask Repair requires at least one object with selected faces and a texture.")
-                        
-                    print(f"Mask Repair Mode: Created {len(mask_repair_data['original_object_names'])} temp meshes.")
-                    
-                except Exception as mask_error:
-                    print(f" Mask Repair Mode setup error: {mask_error}")
-                    import traceback
-                    traceback.print_exc()
-                    self.report({'ERROR'}, f"Mask Repair Setup Failed: {mask_error}. Aborting.")
-                    return {'CANCELLED'}
-                    
-                except Exception as mask_error:
-                    print(f" Mask Repair Mode setup error: {mask_error}")
-                    import traceback
-                    traceback.print_exc()
-                    self.report({'ERROR'}, f"Mask Repair Setup Failed: {mask_error}. Aborting.")
-                    return {'CANCELLED'}
-
-            # 2. Logic Branching based on Projection Source
-            # Determine which image to project
-            source_path = ""
-            sim_path = ""
-            bypass_api = False
-            temp_dir = None
-
-            if props.projection_source == 'IMAGE':
-                source_image_override = props.projection_image
-                if not source_image_override:
-                    print("❌ Error: No projection image selected")
-                    self.report({'ERROR'}, "No projection image selected")
-                    return {'CANCELLED'}
-                
-                source_path = ""
-                sim_path = ""
-                bypass_api = True
-                print(f"🖼 Projection: Custom Image '{source_image_override.name}'")
-            else:
-                source_image_override = None
-                # I directory for workspace
+            try:
+                temp_dir = None
                 if props.debug_mode:
                     blend_path = bpy.data.filepath
                     persistent_dir = os.path.join(os.path.dirname(blend_path), "textures") if blend_path else os.path.join(tempfile.gettempdir(), "textures")
@@ -595,20 +453,18 @@ class GEMINI_OT_texture_projection(Operator):
                     temp_dir = tempfile.mkdtemp(prefix="gemini_proj_")
                     print(f"📁 Created temporary workspace: {temp_dir}")
 
-                registry['temp_dir'] = temp_dir # REGISTER TEMP DIR
+                registry['temp_dir'] = temp_dir
                 source_path = os.path.join(temp_dir, "captured_input.png")
-                
-                # I configure for capture
-                space_data.overlay.show_overlays = False
-                scene.render.image_settings.file_format = 'PNG'
-                
+
+                # I resolution config (Applied to scene.render for opengl capture)
                 scene.render.resolution_x = capture_width
                 scene.render.resolution_y = capture_height
                 scene.render.resolution_percentage = 100
-                
-                # ======================================================================
-                # VIEWPORT REFERENCE CAPTURE: Capture clean viewport BEFORE masks are added
-                # ======================================================================
+                scene.render.image_settings.file_format = 'PNG'
+                space_data.overlay.show_overlays = False
+
+                # Viewport reference capture MUST happen here, before any mask meshes exist
+                # to ensure the reference image is "clean" and useful for AI.
                 reference_path_for_thread = None
                 if props.use_style_reference and props.use_viewport_as_reference:
                     try:
@@ -621,77 +477,88 @@ class GEMINI_OT_texture_projection(Operator):
                             print(" ❌ Viewport reference capture failed")
                     except Exception as ref_error:
                         print(f" ❌ Viewport reference error: {ref_error}")
-                
-                # Mask Repair setup handled in common block above
-                try:
-                    # A. Capture Color (Native Resolution)
-                    # I forced Resolution Application (for Camera Render)
-                    if use_camera_render:
-                        scene.render.resolution_x = capture_width
-                        scene.render.resolution_y = capture_height
-                        scene.render.resolution_percentage = 100
-                    
-                    print(f"📸 Capturing viewport color ({capture_width}x{capture_height})...")
-                    props.status_text = "📸 Capturing viewport..."
-                    
-                    # D. Determine Capture Requirements & Execute
-                    # Anti-redundancy with meaningful debug:
-                    # 1. Capture the INTENDED AI SOURCE
-                    source_filename = "debug_capture.png" if props.debug_mode else "captured_source.png"
-                    source_path = os.path.join(temp_dir, source_filename)
-                    
-                    if props.input_source == 'COLOR':
-                        print("🎨 Capturing Color Viewport (Input Source)")
-                        success = capture_viewport_to_file(self, context, scene, props, space_data, region, v_width, v_height, temp_dir, source_filename)
-                    else: # DEPTH
-                        print(" Capturing Depth Map (Input Source)")
-                        success = capture_viewport_to_file(self, context, scene, props, space_data, region, v_width, v_height, temp_dir, source_filename, is_depth=True)
 
-                    if not success:
-                        raise Exception("Primary viewport capture failed")
+                # ======================================================================
+                # 2. MASK REPAIR SETUP: Create temp mask mesh
+                # ======================================================================
+                mask_repair_data = None
+                if props.mask_repair_mode:
+                    mask_repair_data = projection_utils.setup_mask_repair_meshes(context, props, registry)
+                    if not mask_repair_data:
+                        self.report({'ERROR'}, "Mask Repair Setup Failed. Check console for details.")
+                        _local_cleanup()
+                        return {'CANCELLED'}
 
-                    # 2. Handle Projection Source
+                # 2. Logic Branching based on Projection Source
+                # Determine which image to project
+                source_path = ""
+                sim_path = ""
+                bypass_api = False
+
+                if props.projection_source == 'IMAGE':
+                    source_image_override = props.projection_image
+                    if not source_image_override:
+                        print("❌ Error: No projection image selected")
+                        self.report({'ERROR'}, "No projection image selected")
+                        return {'CANCELLED'}
+                    
+                    source_path = ""
                     sim_path = ""
-                    bypass_api = (props.projection_source != 'AI')
-                    
-                    if props.projection_source == 'VIEW':
-                        # VIEW: Capture color viewport directly as the result
-                        sim_filename = "view_capture.png"
-                        sim_path = os.path.join(temp_dir, sim_filename)
-                        print("📸 Capturing Viewport for Direct Projection (Projection: View)")
+                    bypass_api = True
+                    print(f"🖼 Projection: Custom Image '{source_image_override.name}'")
+                else:
+                    source_image_override = None
+                    try:
+                        print(f"📸 Capturing viewport color ({capture_width}x{capture_height})...")
+                        props.status_text = "📸 Capturing viewport..."
                         
-                        if not capture_viewport_to_file(self, context, scene, props, space_data, region, v_width, v_height, temp_dir, sim_filename, show_wireframe=False, is_depth=False):
-                            raise Exception("Viewport capture failed")
-                    elif props.projection_source == 'GRID':
-                        # GRID: Capture wireframe
-                        sim_filename = "grid_simulation.png"
-                        sim_path = os.path.join(temp_dir, sim_filename)
-                        print("⚒ Capturing Wireframe Grid (Projection: Grid)")
-                        if not capture_viewport_to_file(self, context, scene, props, space_data, region, v_width, v_height, temp_dir, sim_filename, show_wireframe=True):
-                            raise Exception("Grid capture failed")
-                    elif props.projection_source == 'IMAGE':
-                        # Custom projection image - handled above
-                        pass
-                    # AI projection handled in thread
+                        source_filename = "debug_capture.png" if props.debug_mode else "captured_source.png"
+                        source_path = os.path.join(temp_dir, source_filename)
+                        
+                        if props.input_source == 'COLOR':
+                            print("🎨 Capturing Color Viewport (Input Source)")
+                            success = capture_viewport_to_file(self, context, scene, props, space_data, region, v_width, v_height, temp_dir, source_filename)
+                        else: # DEPTH
+                            print(" Capturing Depth Map (Input Source)")
+                            success = capture_viewport_to_file(self, context, scene, props, space_data, region, v_width, v_height, temp_dir, source_filename, is_depth=True)
 
-                except Exception as capture_error:
-                    print(f" Capture Error: {capture_error}")
-                    import traceback
-                    traceback.print_exc()
-                    self.report({'ERROR'}, f"Capture failed: {str(capture_error)}")
-                    return {'CANCELLED'}
+                        if not success:
+                            raise Exception("Primary viewport capture failed")
 
-                finally:
+                        # 2. Handle Projection Source
+                        sim_path = ""
+                        bypass_api = (props.projection_source != 'AI')
+                        
+                        if props.projection_source == 'VIEW':
+                            sim_filename = "view_capture.png"
+                            sim_path = os.path.join(temp_dir, sim_filename)
+                            print("📸 Capturing Viewport for Direct Projection (Projection: View)")
+                            if not capture_viewport_to_file(self, context, scene, props, space_data, region, v_width, v_height, temp_dir, sim_filename, show_wireframe=False, is_depth=False):
+                                raise Exception("Viewport capture failed")
+                        elif props.projection_source == 'GRID':
+                            sim_filename = "grid_simulation.png"
+                            sim_path = os.path.join(temp_dir, sim_filename)
+                            print("⚒ Capturing Wireframe Grid (Projection: Grid)")
+                            if not capture_viewport_to_file(self, context, scene, props, space_data, region, v_width, v_height, temp_dir, sim_filename, show_wireframe=True):
+                                raise Exception("Grid capture failed")
 
-                    scene.render.filepath = render_filepath
-                    scene.render.image_settings.file_format = render_format
-                    space_data.overlay.show_overlays = original_show_overlays
-                    space_data.shading.type = original_shading_type
-                    
+                    except Exception as capture_error:
+                        print(f" Capture Error: {capture_error}")
+                        import traceback
+                        traceback.print_exc()
+                        self.report({'ERROR'}, f"Capture failed: {str(capture_error)}")
+                        return {'CANCELLED'}
 
-                    scene.render.resolution_x = original_res_x
-                    scene.render.resolution_y = original_res_y
-                    scene.render.resolution_percentage = original_res_pct
+            finally:
+                # ALWAYS RESTORE SCENE STATE
+                scene.render.filepath = render_filepath
+                scene.render.image_settings.file_format = render_format
+                space_data.overlay.show_overlays = original_show_overlays
+                space_data.shading.type = original_shading_type
+                
+                scene.render.resolution_x = original_res_x
+                scene.render.resolution_y = original_res_y
+                scene.render.resolution_percentage = original_res_pct
 
             # 3. Setup Projection Logic (Remapping UVs)
             

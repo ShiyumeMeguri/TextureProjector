@@ -432,7 +432,125 @@ def project_uvs_on_mesh(bm, obj, scene, camera=None, region=None, rv3d=None, v_w
                 else:
                     uv = (0, 0)
                     
-                loop[uv_layer].uv = uv
+def setup_mask_repair_meshes(context, props, registry):
+    """
+    Setup temporary mask meshes for selected objects in Edit Mode.
+    Returns mask_repair_data dictionary or None.
+    """
+    try:
+        print("Mask Repair Mode: Creating mask overlay meshes for selected objects...")
+        
+        mask_repair_data = {
+            'original_textures': {},
+            'original_object_names': [],
+            'temp_to_original': {}
+        }
+        
+        # Process all selected mesh objects
+        for obj in context.selected_objects:
+            if obj.type != 'MESH': continue
+            if obj.mode != 'EDIT':
+                print(f" Skipping {obj.name} - not in Edit Mode")
+                continue
                 
-    return face_updated
+            obj_name = obj.name
+            print(f"Mask Repair Mode: Processing '{obj_name}'")
+            
+            import bmesh
+            bm = bmesh.from_edit_mesh(obj.data)
+            
+            # Identify selected faces
+            selected_faces = [f for f in bm.faces if f.select]
+            if not selected_faces:
+                print(f" Mask Repair Mode: No faces selected on '{obj_name}', skipping")
+                continue
+                
+            print(f" Mask Repair Mode: {len(selected_faces)} faces selected on '{obj_name}'")
+            
+            # FACE-AWARE TEXTURE TARGETING
+            target_mat_index = selected_faces[0].material_index
+            original_texture = None
+            
+            if target_mat_index < len(obj.material_slots):
+                slot = obj.material_slots[target_mat_index]
+                if slot.material and slot.material.use_nodes:
+                    for node in slot.material.node_tree.nodes:
+                        if node.type == 'TEX_IMAGE' and node.image:
+                            original_texture = node.image
+                            break
+            
+            if not original_texture:
+                # Fallback to first found texture
+                for slot in obj.material_slots:
+                    if slot.material and slot.material.use_nodes:
+                        for node in slot.material.node_tree.nodes:
+                            if node.type == 'TEX_IMAGE' and node.image:
+                                original_texture = node.image
+                                break
+                    if original_texture: break
+            
+            if not original_texture:
+                print(f" ⚠ Warning: Object '{obj_name}' has no textures. Skipping mask for this object.")
+                continue
+
+            bm_copy = bm.copy()
+            faces_to_delete = [f for f in bm_copy.faces if not f.select]
+            bmesh.ops.delete(bm_copy, geom=faces_to_delete, context='FACES')
+            
+            temp_mesh = bpy.data.meshes.new(f"{obj_name}_MaskTemp_Data")
+            bm_copy.to_mesh(temp_mesh)
+            bm_copy.free()
+            
+            temp_obj = bpy.data.objects.new(f"{obj_name}_MaskTemp", temp_mesh)
+            temp_obj.matrix_world = obj.matrix_world.copy()
+            
+            context.collection.objects.link(temp_obj)
+            registry['temp_objects'].append(temp_obj.name)
+            
+            mask_repair_data['original_textures'][obj_name] = original_texture.name
+            mask_repair_data['original_object_names'].append(obj_name)
+            mask_repair_data['temp_to_original'][temp_obj.name] = obj_name
+            
+            # ANTI-ZFIGHTING (Solidify)
+            solidify_mod = temp_obj.modifiers.new(name="Gemini_Solidify", type='SOLIDIFY')
+            solidify_mod.thickness = 0.002
+            solidify_mod.offset = 0
+            solidify_mod.use_rim = True
+            
+            # Setup Pure Color Emission Material for Mask
+            mask_mat_name = f"Gemini_Mask_{obj_name}_Material_Temp"
+            mask_mat = bpy.data.materials.get(mask_mat_name)
+            if mask_mat:
+                bpy.data.materials.remove(mask_mat)
+            mask_mat = bpy.data.materials.new(name=mask_mat_name)
+            mask_mat.use_nodes = True
+            mask_nodes = mask_mat.node_tree.nodes
+            mask_links = mask_mat.node_tree.links
+            mask_nodes.clear()
+            
+            registry['temp_materials'].append(mask_mat_name)
+
+            mask_output = mask_nodes.new("ShaderNodeOutputMaterial")
+            mask_output.location = (300, 0)
+            mask_emit = mask_nodes.new("ShaderNodeEmission")
+            mask_emit.location = (100, 0)
+            mask_emit.inputs['Color'].default_value = (props.mask_color[0], props.mask_color[1], props.mask_color[2], 1.0)
+            mask_emit.inputs['Strength'].default_value = 1.0
+            mask_links.new(mask_emit.outputs['Emission'], mask_output.inputs['Surface'])
+            
+            temp_obj.data.materials.clear()
+            temp_obj.data.materials.append(mask_mat)
+        
+        if not mask_repair_data['original_object_names']:
+            print(" ⚠ Mask Repair Warning: No valid objects found for mask.")
+            return None
+            
+        print(f"Mask Repair Mode: Created {len(mask_repair_data['original_object_names'])} temp meshes.")
+        return mask_repair_data
+        
+    except Exception as e:
+        print(f" ❌ setup_mask_repair_meshes failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
