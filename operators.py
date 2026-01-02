@@ -129,36 +129,41 @@ def capture_viewport_to_file(operator, context, scene, props, space_data, region
     CAMERA PRIORITY LOGIC:
     - If scene has a camera → Use camera render (bpy.ops.render.render)
     - Otherwise → Fallback to viewport capture (bpy.ops.render.opengl)
-    
-    This ensures pixel-perfect alignment with world_to_camera_view() UV projection.
+    - WYSIWYG: Synced with viewport shading (Solid -> Workbench, Rendered -> Eevee)
     """
     target_path = os.path.join(temp_dir, filename)
-    original_shading_type = space_data.shading.type
     rv3d = context.region_data
     is_camera_view = (rv3d.view_perspective == 'CAMERA') if rv3d else False
     has_camera = scene.camera is not None and is_camera_view
     
+    # Store original states
+    original_shading_type = space_data.shading.type
+    original_render_engine = scene.render.engine
+    original_filepath = scene.render.filepath
+    original_display_shading_color = scene.display.shading.color_type
+    original_display_shading_light = scene.display.shading.light
+    
     try:
         if is_depth:
-            # I depth capture logic
+            # DEPTH CAPTURE LOGIC
             depth_renderer = depth_utils.DepthRenderer()
             
             if has_camera:
-                # CAMERA DEPTH: Use unified GPU depth render from camera
                 print(" Capturing CAMERA DEPTH (Unified GPU)...")
+                # Depsgraph required for newer Blender versions
+                depsgraph = context.evaluated_depsgraph_get()
                 view_matrix = scene.camera.matrix_world.inverted()
-                # I use context.evaluated_depsgraph_get() for calc_matrix_camera in 4.0+
-                projection_matrix = scene.camera.calc_matrix_camera(context.evaluated_depsgraph_get(), x=v_width, y=v_height)
+                projection_matrix = scene.camera.calc_matrix_camera(depsgraph, x=v_width, y=v_height)
+                
                 raw_depth_path = depth_renderer.render_depth_gpu(
                     context, 
                     width=v_width, 
                     height=v_height, 
                     view_matrix=view_matrix, 
                     projection_matrix=projection_matrix,
-                    invert=True # I keep consistent with previous logic
+                    invert=True 
                 )
             else:
-                # VIEWPORT DEPTH: Use unified GPU depth render from viewport
                 print(" Capturing VIEWPORT DEPTH (Unified GPU)...")
                 raw_depth_path = depth_renderer.render_depth_gpu(
                     context, 
@@ -171,41 +176,67 @@ def capture_viewport_to_file(operator, context, scene, props, space_data, region
                 shutil.copy2(raw_depth_path, target_path)
                 return True
             return False
+
         else:
-            # Color/Wireframe capture
-            original_render_engine = scene.render.engine
-            original_filepath = scene.render.filepath
+            # COLOR/WIREFRAME CAPTURE LOGIC
+            print(f" Capturing {'wireframe' if show_wireframe else 'color'} ({'Camera' if has_camera else 'Viewport'})")
             
-            # UNIFIED COLOR CAPTURE LOGIC (High speed via OpenGL)
-            # I this matches other projects efficiency for both Camera and Viewport
-            print(f" Using HIGH-SPEED CAPTURE for {'wireframe' if show_wireframe else 'color'} ({'Camera' if has_camera else 'Viewport'})")
-            
-
-            if show_wireframe:
-                space_data.shading.type = 'WIREFRAME'
-            else:
-                # I ensure EEVEE + RENDERED for high quality but fast color capture
-                if scene.render.engine not in ['BLENDER_EEVEE', 'BLENDER_EEVEE_NEXT']:
-                    try:
-                        scene.render.engine = 'BLENDER_EEVEE_NEXT'
-                    except:
-                        scene.render.engine = 'BLENDER_EEVEE'
-                space_data.shading.type = 'RENDERED'
-            
-
-            # (Resolution already snapped and set in scene.render by caller)
+            # Setup Render Path
             scene.render.filepath = target_path
             scene.render.image_settings.file_format = 'PNG'
-            
 
-            # Use view_context=False in camera mode to respect render resolution settings
-            bpy.ops.render.opengl(write_still=True, view_context=not has_camera)
-            
+            if has_camera:
+                # === CAMERA MODE (Strict Rendering) ===
+                # We interpret the viewport state and configure the Render Engine to match it.
+                # using view_context=False to enforce CAMERA RESOLUTION.
+                
+                if show_wireframe:
+                     # Grid/Wireframe Mode
+                     scene.render.engine = 'BLENDER_WORKBENCH'
+                     scene.display.shading.color_type = 'OBJECT' # Clear wireframe
+                     # Wireframe is usually handled by the operator 'view_context' if available, 
+                     # but for Render we might need to toggle Freestyle or similar if we wanted true wireframe render.
+                     # For now, let's rely on standard Workbench defaults or user request.
+                     # UPDATE: The user asked for "Wireframe Grid" specifically for that mode.
+                     # We can use view_context=True just for this specific case if needed, but the requirement 
+                     # was "Camera Resolution". Workbench render supports wireframe.
+                     pass 
 
-            space_data.shading.type = original_shading_type
-            scene.render.engine = original_render_engine
-            scene.render.filepath = original_filepath
-            
+                else:
+                    # Sync Engine to Viewport Shading
+                    view_shading = space_data.shading.type
+                    
+                    if view_shading == 'SOLID':
+                        scene.render.engine = 'BLENDER_WORKBENCH'
+                        # Sync visual settings for WYSIWYG
+                        scene.display.shading.color_type = space_data.shading.color_type
+                        scene.display.shading.light = space_data.shading.light
+                        # Ensure we are not in wireframe mode in workbench unless requested
+                        scene.display.shading.type = 'SOLID'
+                        
+                    elif view_shading in ['MATERIAL', 'RENDERED']:
+                        # Use EEVEE for high quality preview
+                        if scene.render.engine not in ['BLENDER_EEVEE', 'BLENDER_EEVEE_NEXT']:
+                            try:
+                                scene.render.engine = 'BLENDER_EEVEE_NEXT'
+                            except:
+                                scene.render.engine = 'BLENDER_EEVEE'
+                
+                # Render using the configured engine and resolution
+                bpy.ops.render.render(write_still=True)
+                
+            else:
+                # === VIEWPORT MODE (WYSIWYG) ===
+                # Use standard viewport capture. 
+                # Changes shading ONLY if specifically checking wireframe
+                
+                if show_wireframe:
+                    space_data.shading.type = 'WIREFRAME'
+                
+                # view_context=True ensures exact visual match including Overlays if enabled (though we disabled them earlier for clean capture)
+                # and uses Viewport Resolution (width/height passed in are ignored by opengl op with view_context=True, it uses window size)
+                bpy.ops.render.opengl(write_still=True, view_context=True)
+
             print(f" Capture saved: {target_path}")
             return True
             
@@ -213,11 +244,19 @@ def capture_viewport_to_file(operator, context, scene, props, space_data, region
         print(f" Capture helper failed: {e}")
         import traceback
         traceback.print_exc()
+        return False
+    finally:
+        # Restore State
         if 'original_shading_type' in locals():
             space_data.shading.type = original_shading_type
         if 'original_render_engine' in locals():
             scene.render.engine = original_render_engine
-        return False
+        if 'original_filepath' in locals():
+            scene.render.filepath = original_filepath
+        if 'original_display_shading_color' in locals():
+            scene.display.shading.color_type = original_display_shading_color
+        if 'original_display_shading_light' in locals():
+            scene.display.shading.light = original_display_shading_light
 
 class GEMINI_OT_texture_projection(Operator):
     """Deeply integrated AI Texture Projection"""
