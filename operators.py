@@ -190,6 +190,23 @@ def capture_viewport_to_file(operator, context, scene, props, space_data, region
                 # We interpret the viewport state and configure the Render Engine to match it.
                 # using view_context=False to enforce CAMERA RESOLUTION.
                 
+                # FEATURE: Sync Viewport Visibility to Render
+                # Objects hidden in viewport (Eye closed) should be hidden in render (Camera closed) temporarily
+                temp_hidden_objects = []
+                try:
+                    # Iterate all objects in the view layer
+                    for obj in context.view_layer.objects:
+                        # Check if hidden in viewport but enabled in render
+                        # visible_get() accounts for Collections, Layer Visibility, etc.
+                        # If visible_get is False, it means we can't see it (hidden).
+                        # If hide_render is False, it means it WOULD render.
+                        # So we want: If NOT visible in viewport AND visible in render -> Hide in Render.
+                        if not obj.visible_get() and not obj.hide_render:
+                            obj.hide_render = True
+                            temp_hidden_objects.append(obj)
+                except Exception as e:
+                    print(f" Warning: Failed to sync visibility: {e}")
+
                 if show_wireframe:
                      # Grid/Wireframe Mode
                      scene.render.engine = 'BLENDER_WORKBENCH'
@@ -246,6 +263,13 @@ def capture_viewport_to_file(operator, context, scene, props, space_data, region
         traceback.print_exc()
         return False
     finally:
+        # Restore Render Visibility
+        if 'temp_hidden_objects' in locals() and temp_hidden_objects:
+            for obj in temp_hidden_objects:
+                try:
+                    obj.hide_render = False
+                except: pass
+        
         # Restore State
         if 'original_shading_type' in locals():
             space_data.shading.type = original_shading_type
