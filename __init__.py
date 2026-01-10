@@ -13,6 +13,34 @@ bl_info = {
 import bpy
 from bpy.types import AddonPreferences
 from bpy.props import StringProperty
+import sys
+import subprocess
+import importlib
+
+def ensure_dependencies():
+    """Ensure required external libraries are installed"""
+    required_libs = [
+        ("PIL", "Pillow"),
+        ("google.genai", "google-genai")
+    ]
+    
+    for module_name, package_name in required_libs:
+        try:
+            importlib.import_module(module_name)
+        except ImportError:
+            print(f"[NANO BANANA] {package_name} not found. Auto-installing...")
+            try:
+                subprocess.check_call([sys.executable, "-m", "pip", "install", package_name])
+                print(f"[NANO BANANA] Successfully installed {package_name}")
+                
+                # Invalidate caches to ensure newly installed package is found
+                importlib.invalidate_caches()
+            except Exception as e:
+                print(f"[NANO BANANA] Failed to auto-install {package_name}: {e}")
+
+# Ensure dependencies before importing local modules
+ensure_dependencies()
+
 
 # I reload modules for development
 if "bpy" in locals():
