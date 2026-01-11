@@ -467,10 +467,22 @@ class GeminiAPI:
 
 
     def _process_sdk_response(self, response) -> Tuple[bytes, str]:
-        if not response.candidates or not response.candidates[0].content.parts:
-            raise GeminiAPIError("No output generated.")
+        if not response.candidates:
+            raise GeminiAPIError("No candidates returned from API.")
         
-        for part in response.candidates[0].content.parts:
+        candidate = response.candidates[0]
+        
+        # Safety Check: Content might be None if blocked
+        if not candidate.content:
+            reason = "Unknown"
+            try: reason = str(candidate.finish_reason)
+            except: pass
+            raise GeminiAPIError(f"Response blocked. Finish Reason: {reason}")
+
+        if not candidate.content.parts:
+            raise GeminiAPIError("No content parts generated.")
+        
+        for part in candidate.content.parts:
             if part.inline_data is not None:
                 image = Image.open(BytesIO(part.inline_data.data))
                 if image.mode not in ('RGB', 'RGBA'): image = image.convert('RGB')
@@ -478,20 +490,33 @@ class GeminiAPI:
                 image.save(buf, format='PNG')
                 return buf.getvalue(), "image/png"
         
-        text_parts = [p.text for p in response.candidates[0].content.parts if p.text]
+        text_parts = [p.text for p in candidate.content.parts if p.text]
         if text_parts:
             return self._create_placeholder_image(f"Response: {' '.join(text_parts)}")
         raise GeminiAPIError("No image data returned")
 
     def _process_rest_response(self, response) -> Tuple[bytes, str]:
         if response.status_code != 200:
-            raise GeminiAPIError(f"API Error {response.status_code}: {response.text}")
+            error_msg = response.text
+            try:
+                error_json = response.json()
+                if 'error' in error_json:
+                    error_msg = error_json['error'].get('message', error_msg)
+            except: pass
+            raise GeminiAPIError(f"API Error {response.status_code}: {error_msg}")
         
         result = response.json()
         if 'candidates' not in result or not result['candidates']:
             raise GeminiAPIError("No candidates.")
         
-        parts = result['candidates'][0]['content'].get('parts', [])
+        candidate = result['candidates'][0]
+        
+        # Safety/Content Check
+        if 'content' not in candidate:
+            finish_reason = candidate.get('finishReason', 'UNKNOWN')
+            raise GeminiAPIError(f"Response blocked or empty. Finish Reason: {finish_reason}")
+        
+        parts = candidate['content'].get('parts', [])
         for part in parts:
             inline = part.get('inline_data') or part.get('inlineData')
             if inline:
