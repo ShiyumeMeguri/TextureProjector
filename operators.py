@@ -210,14 +210,12 @@ def capture_viewport_to_file(operator, context, scene, props, space_data, region
                 if show_wireframe:
                      # Grid/Wireframe Mode
                      scene.render.engine = 'BLENDER_WORKBENCH'
-                     scene.display.shading.color_type = 'OBJECT' # Clear wireframe
-                     # Wireframe is usually handled by the operator 'view_context' if available, 
-                     # but for Render we might need to toggle Freestyle or similar if we wanted true wireframe render.
-                     # For now, let's rely on standard Workbench defaults or user request.
-                     # UPDATE: The user asked for "Wireframe Grid" specifically for that mode.
-                     # We can use view_context=True just for this specific case if needed, but the requirement 
-                     # was "Camera Resolution". Workbench render supports wireframe.
-                     pass 
+                     scene.display.shading.type = 'WIREFRAME' 
+                     scene.display.shading.color_type = 'OBJECT'
+                     scene.display.shading.light = 'FLAT'
+                     
+                     # Ensure XRay is useful if needed, usually Defaults are okay.
+                     # We assume objects are visible. 
 
                 else:
                     # Sync Engine to Viewport Shading
@@ -271,10 +269,10 @@ def capture_viewport_to_file(operator, context, scene, props, space_data, region
                 except: pass
         
         # Restore State
-        if 'original_shading_type' in locals():
-            space_data.shading.type = original_shading_type
         if 'original_render_engine' in locals():
             scene.render.engine = original_render_engine
+        if 'original_shading_type' in locals():
+            space_data.shading.type = original_shading_type
         if 'original_filepath' in locals():
             scene.render.filepath = original_filepath
         if 'original_display_shading_color' in locals():
@@ -430,6 +428,7 @@ class GEMINI_OT_texture_projection(Operator):
             # Backups for 3D View state
             original_show_overlays = space_data.overlay.show_overlays
             original_shading_type = space_data.shading.type
+            original_render_engine = scene.render.engine
             
             # I record original active UV layers for all selected mesh objects
             # This is critical for restoration and correct destination UV lookup during baking
@@ -556,8 +555,16 @@ class GEMINI_OT_texture_projection(Operator):
                     scene.render.filepath = render_filepath
                     scene.render.image_settings.file_format = render_format
                     space_data.overlay.show_overlays = original_show_overlays
-                    space_data.shading.type = original_shading_type
                     
+                    # Robust Restoration: Engine FIRST, then Shading
+                    # This prevents "enum 'MATERIAL' not found" errors if we are stuck in Workbench
+                    if 'original_render_engine' in locals():
+                        scene.render.engine = original_render_engine
+                        
+                    try:
+                        space_data.shading.type = original_shading_type
+                    except Exception as e:
+                        print(f"Warning: Could not restore shading type safely: {e}")
 
                     scene.render.resolution_x = original_res_x
                     scene.render.resolution_y = original_res_y
