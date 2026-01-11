@@ -55,15 +55,20 @@ def snap_to_supported_resolution(res_x, res_y):
     
     return (final_w, final_h)
 
-def get_capture_dimensions(context, scene, region):
+def get_capture_dimensions(scene, region, rv3d):
     """
     Consolidated logic to determine capture width and height based on camera or viewport.
-    Includes resolution snapping for camera mode.
+    Includes resolution snapping ONLY for camera mode.
+    
+    Args:
+        scene: Blender scene
+        region: Viewport region (for Window resolution)
+        rv3d: Region 3D Data (CRITICAL: Must be passed explicitly to ensure correct view state)
     
     Returns:
         (width, height, use_camera_render)
     """
-    rv3d = context.region_data
+    # Strict validation: We ONLY behave like a camera if we are functionally looking through one
     is_camera_view = (rv3d.view_perspective == 'CAMERA') if rv3d else False
     has_camera = scene.camera is not None and is_camera_view
     use_camera_render = has_camera
@@ -74,9 +79,9 @@ def get_capture_dimensions(context, scene, region):
         width, height = best_res
         print(f"  [UTILS] Camera Mode: Snapped {scene.render.resolution_x}x{scene.render.resolution_y} -> {width}x{height}")
     else:
-        # Fallback: Viewport
+        # Fallback: Viewport (Grid or View) - ALWAYS use window resolution
         width, height = region.width, region.height
-        print(f"  [UTILS] Viewport Mode: {width}x{height}")
+        print(f"  [UTILS] Viewport Mode (View/Grid): Using Window Res {width}x{height}")
         
     return width, height, use_camera_render
 

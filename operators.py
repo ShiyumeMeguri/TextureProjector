@@ -123,8 +123,12 @@ def restore_view_state(context, history_item):
 
 
 
-def capture_viewport_to_file(operator, context, scene, props, space_data, region, v_width, v_height, temp_dir, filename, show_wireframe=False, is_depth=False):
+def capture_viewport_to_file(operator, context, scene, props, space_data, region, rv3d, v_width, v_height, temp_dir, filename, view_context_override=None, show_wireframe=False, is_depth=False):
     """Refactored helper for viewport/camera capture.
+    
+    Args:
+        rv3d: Explicitly passed Region 3D data (CRITICAL for correct view matrix)
+        view_context_override: Dictionary override to forcedly render from a specific viewport context
     
     CAMERA PRIORITY LOGIC:
     - If scene has a camera → Use camera render (bpy.ops.render.render)
@@ -132,7 +136,8 @@ def capture_viewport_to_file(operator, context, scene, props, space_data, region
     - WYSIWYG: Synced with viewport shading (Solid -> Workbench, Rendered -> Eevee)
     """
     target_path = os.path.join(temp_dir, filename)
-    rv3d = context.region_data
+    
+    # STRICT: Use passed rv3d for perspective check
     is_camera_view = (rv3d.view_perspective == 'CAMERA') if rv3d else False
     has_camera = scene.camera is not None and is_camera_view
     
@@ -165,10 +170,15 @@ def capture_viewport_to_file(operator, context, scene, props, space_data, region
                 )
             else:
                 print(" Capturing VIEWPORT DEPTH (Unified GPU)...")
+                # EXPLICIT MATRIX PASSING:
+                # When capturing viewport depth (Grid/View), `context` might be properties panel,
+                # so we MUST pass the matrices from the captured `rv3d`.
                 raw_depth_path = depth_renderer.render_depth_gpu(
                     context, 
                     width=v_width, 
                     height=v_height,
+                    view_matrix=rv3d.view_matrix.copy(),
+                    projection_matrix=rv3d.window_matrix.copy(),
                     invert=True
                 )
             
@@ -248,9 +258,22 @@ def capture_viewport_to_file(operator, context, scene, props, space_data, region
                 if show_wireframe:
                     space_data.shading.type = 'WIREFRAME'
                 
-                # view_context=True ensures exact visual match including Overlays if enabled (though we disabled them earlier for clean capture)
-                # and uses Viewport Resolution (width/height passed in are ignored by opengl op with view_context=True, it uses window size)
-                bpy.ops.render.opengl(write_still=True, view_context=True)
+                # view_context=True ensures exact visual match including Overlays
+                # CRITICAL: We MUST provide the override if we are not initiated from a 3D view (e.g. from Properties)
+                # otherwise render.opengl might default to Scene Resolution instead of Window Resolution.
+                if view_context_override:
+                    print(f" OpenGL Capture with Context Override (Resolution: {v_width}x{v_height})")
+                    # Modern Blender 3.2+ Context Override
+                    # Use temp_override with specific keys to avoid 1-2 args ValueError
+                    try:
+                        with context.temp_override(**view_context_override):
+                            bpy.ops.render.opengl(write_still=True, view_context=True)
+                    except AttributeError:
+                        # Fallback for older Blender versions (though unlikely for this user)
+                        bpy.ops.render.opengl(view_context_override, write_still=True, view_context=True)
+                else:
+                    print(f" OpenGL Capture with Implicit Context (Resolution: {v_width}x{v_height})")
+                    bpy.ops.render.opengl(write_still=True, view_context=True)
 
             print(f" Capture saved: {target_path}")
             return True
@@ -402,16 +425,44 @@ class GEMINI_OT_texture_projection(Operator):
                 return {'CANCELLED'}
 
             # Define core variables early
-            viewport_area = next((a for a in context.screen.areas if a.type == 'VIEW_3D'), None)
-            if not viewport_area:
-                self.report({'ERROR'}, "No 3D Viewport found")
+            viewport_area = None
+            region = None
+            space_data = None
+            rv3d = None
+
+            # ROBUST VIEWPORT FINDING:
+            # Iterate all areas to find a 3D Viewport, then find its WINDOW region.
+            for area in context.screen.areas:
+                if area.type == 'VIEW_3D':
+                    viewport_area = area
+                    space_data = area.spaces.active
+                    rv3d = space_data.region_3d
+                    for r in area.regions:
+                        if r.type == 'WINDOW':
+                            region = r
+                            break
+                    if region and rv3d:
+                        break
+            
+            if not viewport_area or not region or not rv3d:
+                self.report({'ERROR'}, "No valid 3D Viewport found")
                 return {'CANCELLED'}
-            region = viewport_area.regions[-1]
-            space_data = next(s for s in viewport_area.spaces if s.type == 'VIEW_3D')
+            
+            # CONTEXT OVERRIDE CONSTRUCTION
+            # This is essential for bpy.ops.render.opengl to work correctly from Properties panel
+            # We construct a minimal precise dictionary for temp_override
+            view_context_override = {
+                'window': context.window,
+                'screen': context.screen,
+                'area': viewport_area,
+                'region': region,
+                'scene': scene,
+                'space_data': space_data
+            }
 
             # PHASE 1: Capture Resolution and Workspace Setup
             # I acquisition of view dimensions and dimensions setup
-            v_width, v_height, use_camera_render = projection_utils.get_capture_dimensions(context, scene, region)
+            v_width, v_height, use_camera_render = projection_utils.get_capture_dimensions(scene, region, rv3d)
             capture_width, capture_height = v_width, v_height
             
             # Workspace setup
@@ -438,10 +489,17 @@ class GEMINI_OT_texture_projection(Operator):
                     original_active_uvs[obj.name] = obj.data.uv_layers.active.name
             
             # MANDATORY: Set global resolution BEFORE any captures (including Reference)
-            if use_camera_render:
-                scene.render.resolution_x = capture_width
-                scene.render.resolution_y = capture_height
-                scene.render.resolution_percentage = 100
+            # MANDATORY: Set global resolution BEFORE any captures (including Reference)
+            # CRITICAL FIX: We must UNCONDITIONALLY set the scene resolution to match our target capture size.
+            # Why? Because bpy.ops.render.opengl() inherently looks at scene.render.resolution_* for its output size,
+            # even when using view_context=True in some contexts.
+            # - For Camera Mode: This applies the SNAPPED resolution (e.g. 1024x1024)
+            # - For Viewport Mode: This applies the RAW viewport resolution (e.g. 1587x939)
+            # We restore the original scene resolution in the 'finally' block, so this is safe.
+            print(f"  [EXEC] Enforcing Scene Resolution: {capture_width}x{capture_height} (Pct: 100%)")
+            scene.render.resolution_x = capture_width
+            scene.render.resolution_y = capture_height
+            scene.render.resolution_percentage = 100
             
             scene.render.image_settings.file_format = 'PNG'
             
@@ -459,7 +517,7 @@ class GEMINI_OT_texture_projection(Operator):
                     original_overlay_state = space_data.overlay.show_overlays
                     space_data.overlay.show_overlays = False
                     
-                    if capture_viewport_to_file(self, context, scene, props, space_data, region, v_width, v_height, temp_dir, ref_filename):
+                    if capture_viewport_to_file(self, context, scene, props, space_data, region, rv3d, v_width, v_height, temp_dir, ref_filename, view_context_override=view_context_override):
                         reference_path_for_thread = os.path.join(temp_dir, ref_filename)
                         print(f" ✅ Viewport reference captured: {reference_path_for_thread}")
                     else:
@@ -504,46 +562,62 @@ class GEMINI_OT_texture_projection(Operator):
                 # This capture sees whatever state the viewport is in (including mask overlays if active)
                 try:
                     props.status_text = "📸 Capturing source..."
-                    # Restoring original overlays so masks (if any) are visible in the capture
-                    # UPDATE: User requests CLEAN capture without selection outlines/grid.
-                    # Since masks are actual objects with Emission materials, they will show up 
-                    # in RENDERED mode even if overlays are OFF.
-                    # so we explicitly turn overlays OFF here.
+                    # Ensure overlays are OFF for capture
                     space_data.overlay.show_overlays = False
                     
-                    source_filename = "debug_capture.png" if props.debug_mode else "captured_source.png"
+                    # Filename Logic:
+                    # AI Mode -> 'debug_capture.png' (Input for AI)
+                    # Grid/View Mode -> 'debug_output.png' (Final Result for Projection)
+                    if props.debug_mode:
+                        if props.projection_source in {'GRID', 'VIEW'}:
+                            source_filename = "debug_output.png"
+                        else:
+                            source_filename = "debug_capture.png"
+                    else:
+                        source_filename = "captured_source.png"
+                        
                     source_path = os.path.join(temp_dir, source_filename)
                     
-                    if props.input_source == 'COLOR':
-                        print(f"🎨 Capturing Color Viewport Source ({capture_width}x{capture_height})")
-                        success = capture_viewport_to_file(self, context, scene, props, space_data, region, v_width, v_height, temp_dir, source_filename)
-                    else: # DEPTH
-                        print(f" Capturing Depth Map Source ({capture_width}x{capture_height})")
-                        # Note: Depth renderer handles its own overlay/shading state usually, but valid to keep overlays off
-                        success = capture_viewport_to_file(self, context, scene, props, space_data, region, v_width, v_height, temp_dir, source_filename, is_depth=True)
+                    # Unified Capture Configuration
+                    use_wireframe = False
+                    use_depth = False
+                    bypass_api = False
+                    
+                    if props.projection_source == 'GRID':
+                        print(f"⚒ Projection Mode: GRID (Capturing Wireframe)")
+                        use_wireframe = True
+                        bypass_api = True
+                    elif props.projection_source == 'VIEW':
+                         print(f"📸 Projection Mode: VIEW (Capturing Color Viewport)")
+                         use_wireframe = False
+                         bypass_api = True
+                    else:
+                        # AI Mode
+                        bypass_api = False
+                        if props.input_source == 'DEPTH':
+                             print(f" Projection Mode: AI (Capturing Depth)")
+                             use_depth = True
+                        else:
+                             print(f"🎨 Projection Mode: AI (Capturing Color)")
+                    
+                    # Single Unified Capture Call
+                    # capture_width/height are already resolved to snapped camera res if needed in Phase 1
+                    success = capture_viewport_to_file(
+                        self, context, scene, props, space_data, region, rv3d, 
+                        v_width, v_height, temp_dir, source_filename, 
+                        view_context_override=view_context_override,
+                        show_wireframe=use_wireframe, is_depth=use_depth
+                    )
 
                     if not success:
-                        raise Exception("Primary viewport capture failed")
-
-                    # Handle Non-AI Projection Sources (VIEW/GRID)
-                    sim_path = ""
-                    bypass_api = (props.projection_source != 'AI')
-                    
-                    if props.projection_source == 'VIEW':
-                        # VIEW: Capture color viewport directly as the result
-                        sim_filename = "view_capture.png"
-                        sim_path = os.path.join(temp_dir, sim_filename)
-                        print("📸 Capturing Viewport for Direct Projection (Projection: View)")
+                        raise Exception("Viewport capture failed")
                         
-                        if not capture_viewport_to_file(self, context, scene, props, space_data, region, v_width, v_height, temp_dir, sim_filename, show_wireframe=False, is_depth=False):
-                            raise Exception("Viewport capture failed")
-                    elif props.projection_source == 'GRID':
-                        # GRID: Capture wireframe
-                        sim_filename = "grid_simulation.png"
-                        sim_path = os.path.join(temp_dir, sim_filename)
-                        print("⚒ Capturing Wireframe Grid (Projection: Grid)")
-                        if not capture_viewport_to_file(self, context, scene, props, space_data, region, v_width, v_height, temp_dir, sim_filename, show_wireframe=True):
-                            raise Exception("Grid capture failed")
+                    # Setup Simulation Path
+                    if bypass_api:
+                        sim_path = source_path
+                        print(f" Simulation Mode: Using captured source as result ({sim_path})")
+                    else:
+                        sim_path = ""
 
                 except Exception as capture_error:
                     print(f" Capture Error: {capture_error}")
