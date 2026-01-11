@@ -1560,6 +1560,84 @@ class GEMINI_OT_load_image_as_reference(Operator, ImportHelper):
         return {'RUNNING_MODAL'}
 
 
+
+class GEMINI_OT_load_custom_image(Operator, ImportHelper):
+    """Load image file for custom texture projection"""
+    bl_idname = "gemini.load_custom_image"
+    bl_label = "Load Custom Texture"
+    bl_description = "Load an image file to use for custom texture projection"
+    bl_options = {'REGISTER'}
+
+    # File browser properties
+    filename_ext = ""
+    filter_glob: StringProperty(
+        default="*.jpg;*.jpeg;*.png;*.bmp;*.tif;*.tiff;*.tga;*.exr;*.hdr",
+        options={'HIDDEN'}
+    )
+    
+    filepath: StringProperty(
+        name="File Path",
+        description="Filepath used for importing the image file",
+        maxlen=1024,
+        subtype='FILE_PATH'
+    )
+
+    def execute(self, context):
+        try:
+            props = context.scene.gemini_render
+            
+            if not self.filepath:
+                self.report({'WARNING'}, "No file selected")
+                return {'CANCELLED'}
+            
+            # Load the image into Blender
+            try:
+                # Load the image
+                image = bpy.data.images.load(self.filepath, check_existing=False)
+                image_name = os.path.basename(self.filepath)
+                
+                if image_name.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.tga', '.exr', '.hdr')):
+                    base_name = os.path.splitext(image_name)[0]
+                    image.name = f"CustomTexture_{base_name}"
+                
+                print(f"🖼 Loaded custom texture: {image.name}")
+                print(f" Image size: {image.size[0]}x{image.size[1]}")
+                
+            except Exception as e:
+                self.report({'ERROR'}, f"Failed to load image: {str(e)}")
+                return {'CANCELLED'}
+            
+            # Automatically set as projection image
+            props.projection_image = image
+            props.projection_source = 'IMAGE'
+                
+            self.report({'INFO'}, f"Custom texture loaded: {image.name}")
+            return {'FINISHED'}
+            
+        except Exception as e:
+            self.report({'ERROR'}, f"Failed to load custom texture: {str(e)}")
+            print(f" Custom texture loading error: {str(e)}")
+            return {'CANCELLED'}
+    
+    def invoke(self, context, event):
+        import os
+        try:
+            if os.name == 'nt':  # Windows
+                pictures_folder = os.path.join(os.path.expanduser('~'), 'Pictures')
+                if os.path.exists(pictures_folder):
+                    self.filepath = pictures_folder
+                else:
+                    self.filepath = os.path.expanduser('~')
+            else:  # Linux/Mac
+                self.filepath = os.path.expanduser('~')
+        except:
+            pass
+            
+        # Open the file browser
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+
 class GEMINI_OT_load_example_reference(Operator):
     """Load example reference image"""
     bl_idname = "gemini.load_example_reference"

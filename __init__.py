@@ -137,6 +137,7 @@ core_classes = (
     operators.GEMINI_OT_open_history_image,
     operators.GEMINI_OT_set_projection_source,
     operators.GEMINI_OT_load_image_as_reference,
+    operators.GEMINI_OT_load_custom_image,
     operators.GEMINI_OT_load_example_reference,
     operators.GEMINI_OT_texture_projection,
     operators.GEMINI_OT_stop_render,

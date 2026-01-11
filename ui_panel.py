@@ -331,6 +331,8 @@ class BANANA_PT_render_panel(Panel):
                     proj_box.label(text="Viewport will be captured as style reference", icon='VIEW_CAMERA')
         elif props.projection_source == 'IMAGE':
             proj_box.prop(props, "projection_image", text="Image")
+            load_row = proj_box.row()
+            load_row.operator("gemini.load_custom_image", text="Load Image", icon='FILEBROWSER')
             if not props.projection_image:
                 proj_box.label(text="Select an image to project", icon='ERROR')
         
