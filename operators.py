@@ -495,13 +495,17 @@ class GEMINI_OT_texture_projection(Operator):
             # - For Camera Mode: This applies the SNAPPED resolution (e.g. 1024x1024)
             # - For Viewport Mode: This applies the RAW viewport resolution (e.g. 1587x939)
             # We restore the original scene resolution in the 'finally' block, so this is safe.
-            if use_camera_render:
-                print(f"  [EXEC] Enforcing Scene Resolution: {capture_width}x{capture_height} (Pct: 100%)")
-                scene.render.resolution_x = capture_width
-                scene.render.resolution_y = capture_height
-                scene.render.resolution_percentage = 100
-            else:
-                print(f"  [EXEC] Using Viewport Resolution (Scene Resolution Unchanged): {capture_width}x{capture_height}")
+            # MANDATORY: Set global resolution BEFORE any captures (including Reference)
+            # CRITICAL FIX: We must UNCONDITIONALLY set the scene resolution to match our target capture size.
+            # Why? Because bpy.ops.render.opengl() inherently looks at scene.render.resolution_* for its output size,
+            # even when using view_context=True in some contexts.
+            # - For Camera Mode: This applies the SNAPPED resolution (e.g. 1024x1024)
+            # - For Viewport Mode: This applies the RAW viewport resolution (e.g. 1587x939)
+            # We restore the original scene resolution in the 'finally' block, so this is safe.
+            print(f"  [EXEC] Enforcing Scene Resolution: {capture_width}x{capture_height} (Pct: 100%)")
+            scene.render.resolution_x = capture_width
+            scene.render.resolution_y = capture_height
+            scene.render.resolution_percentage = 100
             
             scene.render.image_settings.file_format = 'PNG'
             
@@ -920,6 +924,17 @@ class GEMINI_OT_texture_projection(Operator):
             if not thread_started:
                 _local_cleanup()
                 props.is_rendering = False
+            
+            # CRITICAL RESTORATION: Always restore scene resolution settings
+            # This ensures that even if we changed them for viewport capture, they are reset
+            try:
+                if 'original_res_x' in locals():
+                    scene.render.resolution_x = original_res_x
+                    scene.render.resolution_y = original_res_y
+                    scene.render.resolution_percentage = original_res_pct
+                    # print(f"  ✅ [Restoration] Scene resolution restored to {original_res_x}x{original_res_y}")
+            except Exception as e:
+                print(f"  ❌ [Restoration] Failed to restore scene resolution: {e}")
 
 
 
