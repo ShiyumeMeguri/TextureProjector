@@ -438,9 +438,11 @@ class GEMINI_OT_texture_projection(Operator):
                     original_active_uvs[obj.name] = obj.data.uv_layers.active.name
             
             # MANDATORY: Set global resolution BEFORE any captures (including Reference)
-            scene.render.resolution_x = capture_width
-            scene.render.resolution_y = capture_height
-            scene.render.resolution_percentage = 100
+            if use_camera_render:
+                scene.render.resolution_x = capture_width
+                scene.render.resolution_y = capture_height
+                scene.render.resolution_percentage = 100
+            
             scene.render.image_settings.file_format = 'PNG'
             
             # PHASE 1: Capture Resolution and Workspace Setup
