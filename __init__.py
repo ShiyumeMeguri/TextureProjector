@@ -21,7 +21,8 @@ def ensure_dependencies():
     """Ensure required external libraries are installed"""
     required_libs = [
         ("PIL", "Pillow"),
-        ("google.genai", "google-genai")
+        ("google.genai", "google-genai"),
+        ("requests", "requests")
     ]
     
     for module_name, package_name in required_libs:

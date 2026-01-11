@@ -26,9 +26,13 @@ except ImportError:
     print(" google-genai not installed, using fallback REST API")
     GENAI_AVAILABLE = False
 
+# Import requests for REST API fallback (always import to avoid NameError if SDK fails)
+try:
     import requests
     import json
     import base64
+except ImportError:
+    print(" Warning: requests library not found. REST API fallback will fail.")
 
 class GeminiAPIError(Exception):
     """Custom exception for Gemini API errors"""
@@ -54,8 +58,8 @@ class GeminiAPI:
             print(f" Using official Google GenAI SDK (Model: {self.model})")
             try:
                 # I configure the official client
-                genai.configure(api_key=api_key)
-                self.client = genai.Client()
+                # New SDK (google-genai) passes api_key to Client constructor
+                self.client = genai.Client(api_key=api_key)
                 self.use_sdk = True
             except Exception as e:
                 print(f" SDK setup failed: {e}, falling back to REST")
