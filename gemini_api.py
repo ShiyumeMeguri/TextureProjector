@@ -4,6 +4,7 @@ Unified logic for Texture Projection.
 """
 
 import os
+import json
 from typing import Optional, Tuple, Dict, Any
 from io import BytesIO
 
@@ -26,13 +27,49 @@ except ImportError:
     print(" google-genai not installed, using fallback REST API")
     GENAI_AVAILABLE = False
 
-# Import requests for REST API fallback (always import to avoid NameError if SDK fails)
+# Import requests for REST API fallback
 try:
     import requests
-    import json
     import base64
 except ImportError:
     print(" Warning: requests library not found. REST API fallback will fail.")
+
+SYSTEM_PROMPTS_FILE = os.path.join(os.path.dirname(__file__), "system_prompts.json")
+
+class PromptManager:
+    """Handles loading and accessing system prompts from JSON configuration."""
+    
+    DEFAULT_PROMPTS = {
+        "depth_with_reference": "",
+        "depth_only": "",
+        "color_with_reference": "",
+        "color_only": "",
+        "inpainting_with_reference": "",
+        "inpainting_only": "",
+        "default_edit_prompt": "Edit this image.",
+        "default_generate_prompt": "Generate image."
+    }
+
+    @classmethod
+    def load_prompts(cls) -> Dict[str, str]:
+        """Load prompts from JSON file or return defaults if file missing/invalid."""
+        if not os.path.exists(SYSTEM_PROMPTS_FILE):
+            print(f" System prompts file not found at {SYSTEM_PROMPTS_FILE}, using defaults.")
+            # Optional: Create the file if it doesn't exist so user can edit it later?
+            # For now, just return defaults.
+            return cls.DEFAULT_PROMPTS.copy()
+            
+        try:
+            with open(SYSTEM_PROMPTS_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                
+            # Merge with defaults to ensure all keys exist
+            prompts = cls.DEFAULT_PROMPTS.copy()
+            prompts.update(data)
+            return prompts
+        except Exception as e:
+            print(f" Error loading system prompts: {e}. Using defaults.")
+            return cls.DEFAULT_PROMPTS.copy()
 
 class GeminiAPIError(Exception):
     """Custom exception for Gemini API errors"""
@@ -72,6 +109,9 @@ class GeminiAPI:
                 print(" PIL not available, using REST API fallback (SDK requires PIL)")
             self.use_sdk = False
             self._setup_rest_fallback()
+        
+        # Load system prompts
+        self.prompts = PromptManager.load_prompts()
     
     def _setup_rest_fallback(self):
         """Setup REST API fallback"""
@@ -86,17 +126,25 @@ class GeminiAPI:
         use_system = get_use_system_prompts()
         
         # SYSTEM PROMPT SELECTION
-        if use_system and has_reference:
+        if use_system:
+            prompt_key = None
             if not is_color_render:
-                # DEPTH MODE (Strict Silhouette)
-                prompt_parts.append(
-                    "You are a master-level texture painting engine, not a renderer: the provided depth image is a completely invisible, immutable, pixel-locked silhouette mask used ONLY to define where painting is allowed and must NEVER appear in the output; the reference image is a style, material, and artistic guidance ONLY and must NEVER be copied, projected, or reproduced; your task is to artistically repaint a finished high-quality 3D model texture INSIDE the depth silhouette only, faithfully reinterpreting the reference image’s style, materials, colors, and artistic language as if painted by a top-tier artist, while treating every pixel outside the depth silhouette as strictly forbidden and fully transparent; do NOT output the depth image, do NOT output the reference image, do NOT visualize masks—only output the final painted texture result constrained perfectly to the depth silhouette, any mask-like or depth-like output is a failure."
-                )
+                # DEPTH MODE
+                if has_reference:
+                    prompt_key = "depth_with_reference"
+                else:
+                    prompt_key = "depth_only"
             else:
-                # COLOR/SCREENSHOT MODE (Context Aware)
-                prompt_parts.append(
-                    "You are a visionary digital artist. The input image is a viewport screenshot providing the base composition and context. Your task is to reimagine this scene using the style, lighting, and materials from the Reference Image. Preserve the original composition and perspective, but elevate the artistic quality to match the reference. Do not simply copy the reference; blend its essence seamlessly into the input scene."
-                )
+                # COLOR/SCREENSHOT MODE
+                if has_reference:
+                    prompt_key = "color_with_reference"
+                else:
+                    prompt_key = "color_only"
+            
+            if prompt_key:
+                system_text = self.prompts.get(prompt_key, "")
+                if system_text:
+                    prompt_parts.append(system_text)
         
         if user_prompt.strip():
             if use_system and has_reference:
@@ -105,7 +153,7 @@ class GeminiAPI:
                 prompt_parts.append(user_prompt.strip())
         else:
             if not prompt_parts: # If no system prompt and no user prompt
-                prompt_parts.append("Generate image.")
+                prompt_parts.append(self.prompts.get("default_generate_prompt", "Generate image."))
             
         return "\n\n".join(prompt_parts)
     
@@ -118,13 +166,14 @@ class GeminiAPI:
         
         # MASK/INPAINTING MODE
         if use_system and has_mask:
-            prompt_parts.append(
-                "You are a precise inpainting engine. Your task is to fill the masked area (indicated by the mask image) to blend seamlessly with the surrounding pixels. Use the Reference Image (if provided) for style/content guidance, but ensure strictly seamless integration. Do not alter any pixels outside the mask."
-            )
+            prompt_key = "inpainting_with_reference" if has_reference else "inpainting_only"
+            system_text = self.prompts.get(prompt_key, "")
+            if system_text:
+                prompt_parts.append(system_text)
             
         final_prompt = user_prompt.strip()
         if not final_prompt:
-            final_prompt = "Edit this image."
+            final_prompt = self.prompts.get("default_edit_prompt", "Edit this image.")
             
         prompt_parts.append(final_prompt)
         
