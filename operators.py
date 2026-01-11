@@ -489,17 +489,19 @@ class GEMINI_OT_texture_projection(Operator):
                     original_active_uvs[obj.name] = obj.data.uv_layers.active.name
             
             # MANDATORY: Set global resolution BEFORE any captures (including Reference)
-            # MANDATORY: Set global resolution BEFORE any captures (including Reference)
             # CRITICAL FIX: We must UNCONDITIONALLY set the scene resolution to match our target capture size.
             # Why? Because bpy.ops.render.opengl() inherently looks at scene.render.resolution_* for its output size,
             # even when using view_context=True in some contexts.
             # - For Camera Mode: This applies the SNAPPED resolution (e.g. 1024x1024)
             # - For Viewport Mode: This applies the RAW viewport resolution (e.g. 1587x939)
             # We restore the original scene resolution in the 'finally' block, so this is safe.
-            print(f"  [EXEC] Enforcing Scene Resolution: {capture_width}x{capture_height} (Pct: 100%)")
-            scene.render.resolution_x = capture_width
-            scene.render.resolution_y = capture_height
-            scene.render.resolution_percentage = 100
+            if use_camera_render:
+                print(f"  [EXEC] Enforcing Scene Resolution: {capture_width}x{capture_height} (Pct: 100%)")
+                scene.render.resolution_x = capture_width
+                scene.render.resolution_y = capture_height
+                scene.render.resolution_percentage = 100
+            else:
+                print(f"  [EXEC] Using Viewport Resolution (Scene Resolution Unchanged): {capture_width}x{capture_height}")
             
             scene.render.image_settings.file_format = 'PNG'
             
