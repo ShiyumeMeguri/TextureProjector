@@ -276,6 +276,15 @@ class BANANA_PT_render_panel(Panel):
         if props.show_settings:
             box = layout.box()
             
+            # System Prompt Config
+            try:
+                package_name = __package__ if __package__ else "nano_banana_render"
+                addon_prefs = context.preferences.addons.get(package_name)
+                if addon_prefs:
+                    box.prop(addon_prefs.preferences, "use_system_prompts", text="Enable System Prompts")
+            except:
+                pass
+
             # Debug options
             box.label(text="Debug:", icon='TOOL_SETTINGS')
             box.prop(props, "debug_mode", text="Manual Debug Mode")

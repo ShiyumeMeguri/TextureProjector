@@ -84,6 +84,12 @@ class NanoBananaPreferences(AddonPreferences):
         subtype='PASSWORD',
     )
 
+    use_system_prompts: bpy.props.BoolProperty(
+        name="Use Optimized System Prompts",
+        description="Enable specialized system prompts for better quality (Depth/Mask adherence). If disabled, only your raw prompt is sent.",
+        default=True
+    )
+
     def draw(self, context):
         layout = self.layout
         
@@ -91,6 +97,13 @@ class NanoBananaPreferences(AddonPreferences):
         box = layout.box()
         box.label(text="API Configuration:", icon='KEYFRAME_HLT')
         box.prop(self, "api_key")
+        
+        # System Prompt Config
+        box.label(text="Prompt Engineering:", icon='MODIFIER')
+        row = box.row()
+        row.prop(self, "use_system_prompts", text="Enable System Prompts")
+        if not self.use_system_prompts:
+            row.label(text="(Raw Input Only)", icon='FILE_TEXT')
         
         # I debug section
         box = layout.box()

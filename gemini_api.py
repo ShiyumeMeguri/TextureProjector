@@ -79,22 +79,56 @@ class GeminiAPI:
         # model is already set in __init__
         
     def _build_prompt(self, user_prompt: str, has_reference: bool = False, is_color_render: bool = False) -> str:
-        """Build minimal prompt passing user intent."""
+        """Build prompt based on mode (Depth vs Color)"""
         prompt_parts = []
-        if has_reference:
-            prompt_parts.append("Use the provided reference image for style, color, and texture details.")
+        
+        # Check preference
+        use_system = get_use_system_prompts()
+        
+        # SYSTEM PROMPT SELECTION
+        if use_system and has_reference:
+            if not is_color_render:
+                # DEPTH MODE (Strict Silhouette)
+                prompt_parts.append(
+                    "You are a master-level texture painting engine, not a renderer: the provided depth image is a completely invisible, immutable, pixel-locked silhouette mask used ONLY to define where painting is allowed and must NEVER appear in the output; the reference image is a style, material, and artistic guidance ONLY and must NEVER be copied, projected, or reproduced; your task is to artistically repaint a finished high-quality 3D model texture INSIDE the depth silhouette only, faithfully reinterpreting the reference image’s style, materials, colors, and artistic language as if painted by a top-tier artist, while treating every pixel outside the depth silhouette as strictly forbidden and fully transparent; do NOT output the depth image, do NOT output the reference image, do NOT visualize masks—only output the final painted texture result constrained perfectly to the depth silhouette, any mask-like or depth-like output is a failure."
+                )
+            else:
+                # COLOR/SCREENSHOT MODE (Context Aware)
+                prompt_parts.append(
+                    "You are a visionary digital artist. The input image is a viewport screenshot providing the base composition and context. Your task is to reimagine this scene using the style, lighting, and materials from the Reference Image. Preserve the original composition and perspective, but elevate the artistic quality to match the reference. Do not simply copy the reference; blend its essence seamlessly into the input scene."
+                )
+        
         if user_prompt.strip():
-            prompt_parts.append(user_prompt.strip())
+            if use_system and has_reference:
+                prompt_parts.append(f"User Instructions: {user_prompt.strip()}")
+            else:
+                prompt_parts.append(user_prompt.strip())
         else:
-            prompt_parts.append("Generate image.")
+            if not prompt_parts: # If no system prompt and no user prompt
+                prompt_parts.append("Generate image.")
+            
         return "\n\n".join(prompt_parts)
     
     def _build_edit_prompt(self, user_prompt: str, has_mask: bool = False, has_reference: bool = False) -> str:
-        """Build minimal edit prompt."""
+        """Build minimal edit prompt with specialized mask instruction."""
+        prompt_parts = []
+        
+        # Check preference
+        use_system = get_use_system_prompts()
+        
+        # MASK/INPAINTING MODE
+        if use_system and has_mask:
+            prompt_parts.append(
+                "You are a precise inpainting engine. Your task is to fill the masked area (indicated by the mask image) to blend seamlessly with the surrounding pixels. Use the Reference Image (if provided) for style/content guidance, but ensure strictly seamless integration. Do not alter any pixels outside the mask."
+            )
+            
         final_prompt = user_prompt.strip()
         if not final_prompt:
             final_prompt = "Edit this image."
-        return final_prompt
+            
+        prompt_parts.append(final_prompt)
+        
+        return "\n\n".join(prompt_parts)
     
     # =========================================================================
     # CORE LOGIC: Parameter Calculation (Unified)
@@ -167,7 +201,10 @@ class GeminiAPI:
             
             # Unified Config Logic
             aspect_ratio, image_size = self._get_image_config_params(width, height)
+            # Unified Config Logic
+            aspect_ratio, image_size = self._get_image_config_params(width, height)
             print(f"🚀 [SDK] Prompting with Aspect Ratio: {aspect_ratio}, Size: {image_size}")
+            print(f"📝 Full System Prompt: {full_prompt}")
             
             try:
                 # Build ImageConfig object
@@ -211,7 +248,10 @@ class GeminiAPI:
             
             # Unified Config Logic
             aspect_ratio, image_size = self._get_image_config_params(width, height)
+            # Unified Config Logic
+            aspect_ratio, image_size = self._get_image_config_params(width, height)
             print(f"🚀 [REST] Prompting with Aspect Ratio: {aspect_ratio}, Size: {image_size}")
+            print(f"📝 Full System Prompt: {full_prompt}")
             
             # Build Payload Helper
             def _build_payload(use_size: bool = True):
@@ -375,6 +415,8 @@ class GeminiAPI:
         except:
             return None
 
+
+
     def _process_sdk_response(self, response) -> Tuple[bytes, str]:
         if not response.candidates or not response.candidates[0].content.parts:
             raise GeminiAPIError("No output generated.")
@@ -447,3 +489,14 @@ def get_api_key() -> Optional[str]:
             return bpy.context.scene.gemini_render.api_key.strip()
     except: pass
     return None
+
+def get_use_system_prompts() -> bool:
+    """Check if system prompts are enabled in preferences (default: True)"""
+    import bpy
+    try:
+        prefs = bpy.context.preferences.addons[__package__].preferences
+        if hasattr(prefs, 'use_system_prompts'):
+            return prefs.use_system_prompts
+    except:
+        pass
+    return True

@@ -135,6 +135,19 @@ def _load_result_image_sync(image_data: bytes, image_name: str = "AI_Result", us
             img = bpy.data.images.load(temp_path)
             img.name = image_name
             
+            # CRITICAL: Always pack image to persist in memory before temp file is deleted
+            try:
+                # FORCE LOAD: Access pixels to ensure they are in memory
+                _ = img.pixels[0] 
+                
+                img.pack()
+                if img.packed_file:
+                    # Ensure color space is correct
+                    if hasattr(img, 'colorspace_settings'):
+                        img.colorspace_settings.name = 'sRGB'
+            except Exception as pe:
+                print(f" Warning: Failed to pack image: {pe}")
+
             # I keep original image for history
             permanent_image_for_history = None
             if user_prompt:
@@ -145,25 +158,6 @@ def _load_result_image_sync(image_data: bytes, image_name: str = "AI_Result", us
                 img.use_fake_user = True
                 print(f" Marked image as fake user: {permanent_name}")
                 
-                try:
-                    # FORCE LOAD: Access pixels to ensure they are in memory before we delete the file
-                    # This is critical on some systems where pack() might be lazy or slow
-                    _ = img.pixels[0] 
-                    print(f" Forced pixel load for: {permanent_name}")
-                    
-                    img.pack()
-                    if img.packed_file:
-                        print(f" History image packed successfully: {permanent_name}")
-                    else:
-                        print(f" Warning: History image pack called but packed_file is None: {permanent_name}")
-                    
-                    # Ensure color space is correct for history too
-                    if hasattr(img, 'colorspace_settings'):
-                        img.colorspace_settings.name = 'sRGB'
-                        
-                    print(f" History image state: {permanent_name} (has_data={img.has_data}, users={img.users})")
-                except Exception as pe:
-                    print(f" Warning: Failed to pack history image: {pe}")
                 permanent_image_for_history = img
             
 
