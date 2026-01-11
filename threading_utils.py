@@ -343,12 +343,20 @@ class ProjectionRenderThread(threading.Thread):
                         if self._stop_event.is_set(): return
                         
                         # Apply to material
-                        mat = bpy.data.materials.get(self.material_name)
-                        if mat and mat.use_nodes:
-                            node = mat.node_tree.nodes.get(self.image_node_name)
-                            if node:
-                                node.image = res_img
-                                print(f"Applied result to material: {self.material_name}")
+                        # I iterate over all target objects to update their specific materials
+                        processed_mats = set()
+                        for data in self.target_objects_data:
+                            m_name = data.get('material_name', self.material_name)
+                            n_name = data.get('image_node_name', self.image_node_name)
+                            
+                            if m_name and m_name not in processed_mats:
+                                mat = bpy.data.materials.get(m_name)
+                                if mat and mat.use_nodes:
+                                    node = mat.node_tree.nodes.get(n_name)
+                                    if node:
+                                        node.image = res_img
+                                        print(f"Applied result to material: {m_name}")
+                                processed_mats.add(m_name)
                         
                         # Apply to Bake if needed
                         if self.do_bake:
@@ -377,7 +385,7 @@ class ProjectionRenderThread(threading.Thread):
                                         projection_utils.perform_projection_bake(
                                             context=bpy.context,
                                             obj=obj,
-                                            texture_node_name=self.image_node_name,
+                                            texture_node_name=data.get('image_node_name', self.image_node_name),
                                             target_image=original_tex,
                                             src_uv_name=data['src_uv_name'],
                                             dest_uv_name=data.get('dest_uv_name', "UVMap"),
@@ -390,7 +398,11 @@ class ProjectionRenderThread(threading.Thread):
                                     if '_MaskTemp' in obj.name: continue
                                     
                                     # Logic to create baked texture and call projection_utils.perform_projection_bake
-                                    baked_name = f"{obj.name}_Baked_AI"
+                                    # HASHED NAMING to prevent internal Blender collision on long names
+                                    safe_hash = abs(hash(obj.name)) % 100000
+                                    safe_name_prefix = obj.name[:30]
+                                    baked_name = f"{safe_name_prefix}_{safe_hash}_{int(time.time())}_Baked_AI"
+                                    
                                     if baked_name in bpy.data.images:
                                          bpy.data.images.remove(bpy.data.images[baked_name])
                                     baked_img = bpy.data.images.new(baked_name, res_img.size[0], res_img.size[1])
@@ -398,7 +410,7 @@ class ProjectionRenderThread(threading.Thread):
                                     projection_utils.perform_projection_bake(
                                         context=bpy.context,
                                         obj=obj,
-                                        texture_node_name=self.image_node_name,
+                                        texture_node_name=data.get('image_node_name', self.image_node_name),
                                         target_image=baked_img,
                                         src_uv_name=data['src_uv_name'],
                                         dest_uv_name=data.get('dest_uv_name', "UVMap"),

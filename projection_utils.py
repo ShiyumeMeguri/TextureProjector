@@ -551,6 +551,12 @@ def setup_projection_material(material_name="Gemini_Projection_Material", use_im
     """
     Setup the projection material with emission and optional image texture.
     
+    CRITICAL WARNING: 
+    Each mesh MUST have its own independent material instance (e.g., Gemini_Projection_Material_Cube).
+    DO NOT OPTIMIZE THIS TO USE A SHARED MATERIAL. 
+    Sharing materials causes multi-selection projection conflicts and overwrites previous projections.
+    STRICTLY MAINTAIN 1:1 OBJECT-TO-MATERIAL MAPPING.
+    
     Args:
         material_name: Name of material to create/get
         use_image: Optional bpy.types.Image to assign to texture node

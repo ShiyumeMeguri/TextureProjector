@@ -574,11 +574,6 @@ class GEMINI_OT_texture_projection(Operator):
 
             # 3. Setup Projection Logic (Remapping UVs)
             
-            # I use a consistent material name but create fresh if needed
-            # Material Setup using Helper
-            material, image_node, uv_map_node = projection_utils.setup_projection_material()
-            mat_name = material.name
-            
             import bmesh
             from bpy_extras import view3d_utils, object_utils
 
@@ -590,8 +585,14 @@ class GEMINI_OT_texture_projection(Operator):
                 print(f" UV Projection: Using CAMERA coordinates (matches camera render)")
             else:
                 print(f" UV Projection: Using VIEWPORT coordinates (fallback)")
+                
             for obj in context.selected_objects:
                 if obj.type != 'MESH': continue
+                
+                # UNIQUE MATERIAL GENERATION
+                # Each object gets its own material to prevent conflicts/overwriting
+                unique_mat_name = f"Gemini_Projection_Material_{obj.name}"
+                material, image_node, uv_map_node = projection_utils.setup_projection_material(material_name=unique_mat_name)
                 
                 # ABSOLUTE ZERO-LEAK GUARD: If in Repair Mode, strictly skip ORIGINAL objects
                 # in the standard projection setup path. Only the temp objects should receive
@@ -657,7 +658,9 @@ class GEMINI_OT_texture_projection(Operator):
                                     'original_object_name': obj.name,
                                     'bm_copy': bm_copy,
                                     'src_uv_name': uv_layer_name,
-                                    'dest_uv_name': dest_uv_name
+                                    'dest_uv_name': dest_uv_name,
+                                    'material_name': material.name, # FIX: Store actual blender-assigned name
+                                    'image_node_name': image_node.name # Stored unique node name (standardized usually)
                                 }
                                 registry['target_objects_data'].append(data)
                                 processed_count += 1
@@ -737,9 +740,23 @@ class GEMINI_OT_texture_projection(Operator):
                             'object_name': obj.name,
                             'bm_copy': bm_copy,
                             'src_uv_name': uv_layer_name,
-                            'dest_uv_name': original_active_uvs.get(obj.name, obj.data.uv_layers.active.name if obj.data.uv_layers.active else "")
+                            'dest_uv_name': original_active_uvs.get(obj.name, obj.data.uv_layers.active.name if obj.data.uv_layers.active else ""),
+                            'material_name': material.name,
+                            'image_node_name': image_node.name
                         }
                         registry['target_objects_data'].append(data)
+                    else:
+                         # Even if no bake, we need to store data for image assignment
+                         data = {
+                            'object_name': obj.name,
+                            'bm_copy': None,
+                            'src_uv_name': uv_layer_name,
+                            'dest_uv_name': "",
+                            'material_name': material.name,
+                            'image_node_name': image_node.name
+                        }
+                         registry['target_objects_data'].append(data)
+
 
             if processed_count == 0:
                 self.report({'WARNING'}, "No faces were projected. Ensure meshes are in Edit Mode with faces selected.")
@@ -796,8 +813,8 @@ class GEMINI_OT_texture_projection(Operator):
                 source_path=source_path, # I intended AI Source
                 sim_path=sim_path,       # I local grid simulation (if any)
                 target_objects_data=registry['target_objects_data'],
-                image_node_name=image_node.name,
-                material_name=material.name,
+                image_node_name="Gemini_Image_Node", # Default fallback, real one in data items
+                material_name="Gemini_Projection_Material", # Default fallback, real one in items
                 do_bake=props.projection_bake,
                 bypass_api=bypass_api,
                 mask_repair_data=mask_repair_data,
