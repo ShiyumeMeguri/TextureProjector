@@ -46,6 +46,9 @@ class PromptManager:
         "color_only": "",
         "inpainting_with_reference": "",
         "inpainting_only": "",
+        "edit_integration": "",
+        "edit_refinement": "",
+        "finalize_composite": "",
         "default_edit_prompt": "Edit this image.",
         "default_generate_prompt": "Generate image."
     }
@@ -118,6 +121,28 @@ class GeminiAPI:
         self.base_url = "https://generativelanguage.googleapis.com/v1beta"
         # model is already set in __init__
         
+    def _log_prompt_debug(self, prompt_type: str, key: str, system_text: str, user_text: str):
+        """Strictly log prompt construction for verification"""
+        # Translate types
+        cn_type = "生成模式 (GENERATION)" if prompt_type == "GENERATION" else "编辑模式 (EDIT)"
+        
+        print(f"\n{'='*20} [GEMINI {cn_type} 提示词调试信息] {'='*20}")
+        print(f"🔑 当前生效模式 (Current Mode): 【 {key} 】")
+        
+        if system_text:
+            print(f"📅 系统提示词完整内容 (System Prompt Full Content):")
+            print(f"{'-'*60}")
+            print(f"{system_text}") # PRINT FULL CONTENT
+            print(f"{'-'*60}")
+        else:
+             print(f"❌ 未应用系统提示词 (No System Prompt)")
+
+        print(f"👤 用户最终指令 (User Instruction):")
+        print(f"{'-'*60}")
+        print(f"{user_text}")
+        print(f"{'-'*60}")
+        print(f"{'='*60}\n")
+
     def _build_prompt(self, user_prompt: str, has_reference: bool = False, is_color_render: bool = False) -> str:
         """Build prompt based on mode (Depth vs Color)"""
         prompt_parts = []
@@ -125,9 +150,11 @@ class GeminiAPI:
         # Check preference
         use_system = get_use_system_prompts()
         
+        prompt_key = None
+        system_text = ""
+        
         # SYSTEM PROMPT SELECTION
         if use_system:
-            prompt_key = None
             if not is_color_render:
                 # DEPTH MODE
                 if has_reference:
@@ -146,36 +173,75 @@ class GeminiAPI:
                 if system_text:
                     prompt_parts.append(system_text)
         
+        # User Prompt Assembly
+        final_user_text = ""
         if user_prompt.strip():
-            if use_system and has_reference:
-                prompt_parts.append(f"User Instructions: {user_prompt.strip()}")
-            else:
-                prompt_parts.append(user_prompt.strip())
+            # Match Reference Style: Explicit Label
+            final_user_text = f"USER_PROMPT (EXECUTE THIS): {user_prompt.strip()}"
+            prompt_parts.append(final_user_text)
         else:
             if not prompt_parts: # If no system prompt and no user prompt
-                prompt_parts.append(self.prompts.get("default_generate_prompt", "Generate image."))
+                default_prompt = self.prompts.get("default_generate_prompt", "Generate image.")
+                prompt_parts.append(default_prompt)
+                final_user_text = f"(默认) {default_prompt}"
+        
+        # Debug Log
+        self._log_prompt_debug("GENERATION", str(prompt_key), system_text, user_prompt.strip() or "(用户未输入 - 使用默认值)")
             
         return "\n\n".join(prompt_parts)
     
     def _build_edit_prompt(self, user_prompt: str, has_mask: bool = False, has_reference: bool = False) -> str:
-        """Build minimal edit prompt with specialized mask instruction."""
+        """Build modular edit prompt based on input data types (Mask vs Reference vs None)"""
         prompt_parts = []
         
         # Check preference
         use_system = get_use_system_prompts()
         
-        # MASK/INPAINTING MODE
-        if use_system and has_mask:
-            prompt_key = "inpainting_with_reference" if has_reference else "inpainting_only"
+        prompt_key = None
+        system_text = ""
+        
+        # Logic from user's framework
+        # 1. Special case: Finalize Composite
+        if use_system and user_prompt.strip() == "[FINALIZE_COMPOSITE]":
+             prompt_key = "finalize_composite"
+             system_text = self.prompts.get(prompt_key, "")
+             self._log_prompt_debug("EDIT", prompt_key, system_text, user_prompt)
+             return system_text
+             
+        # Select prompt key based on inputs
+        if use_system:
+            if has_mask:
+                # INPAINTING MODES
+                if has_reference:
+                    prompt_key = "inpainting_with_reference"
+                else:
+                    prompt_key = "inpainting_only"
+            elif has_reference:
+                # INTEGRATION MODE (Reference but no mask)
+                prompt_key = "edit_integration"
+            else:
+                # REFINEMENT MODE (No mask, no reference - just existing image + prompt)
+                prompt_key = "edit_refinement"
+        
+        # Add system prompt if found
+        if prompt_key:
             system_text = self.prompts.get(prompt_key, "")
             if system_text:
                 prompt_parts.append(system_text)
             
-        final_prompt = user_prompt.strip()
-        if not final_prompt:
-            final_prompt = self.prompts.get("default_edit_prompt", "Edit this image.")
-            
-        prompt_parts.append(final_prompt)
+        final_user_text = ""
+        if user_prompt.strip():
+             # Match Reference Style: Explicit Label
+             final_user_text = f"USER'S EDIT INSTRUCTIONS:\n{user_prompt.strip()}"
+             prompt_parts.append(final_user_text)
+        else:
+             # Default Fallback
+             default_prompt = self.prompts.get("default_edit_prompt", "Edit this image.")
+             prompt_parts.append(default_prompt)
+             final_user_text = f"(Default) {default_prompt}"
+        
+        # Debug Log
+        self._log_prompt_debug("EDIT", str(prompt_key), system_text, user_prompt.strip() or "(Empty User Prompt - Using Default)")
         
         return "\n\n".join(prompt_parts)
     
