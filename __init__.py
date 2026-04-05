@@ -11,6 +11,7 @@ bl_info = {
 }
 
 import bpy
+from bpy.app.handlers import persistent
 from bpy.types import AddonPreferences
 from bpy.props import StringProperty
 import sys
@@ -193,14 +194,17 @@ def register():
     if _reset_is_rendering not in load_post:
         load_post.append(_reset_is_rendering)
 
+@persistent
 def _reset_is_rendering(dummy1=None, dummy2=None):
-    """Reset rendering status on load to prevent infinite 'Processing' state"""
+    """Reset addon runtime state on file load."""
     import bpy
+    threading_utils.reset_threading_state()
+    operators.GEMINI_OT_texture_projection.current_thread = None
     for scene in bpy.data.scenes:
         if hasattr(scene, 'gemini_render'):
             scene.gemini_render.is_rendering = False
             scene.gemini_render.status_text = "Ready to render"
-    print(" [GEMINI] Reset rendering status on file load")
+    print(" [GEMINI] Reset runtime state on file load")
 
 def unregister():
     # I stop any background threads

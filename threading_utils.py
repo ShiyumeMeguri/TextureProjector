@@ -21,7 +21,11 @@ class BlenderThreadManager:
         """Execute function in main Blender thread via timer"""
         self.command_queue.put((func, args, kwargs))
         
-        # I register timer if not already registered
+        # Blend file switches can invalidate timers while this flag still says True.
+        # Re-check the actual timer registration every time we enqueue work.
+        if self.timer_registered and not bpy.app.timers.is_registered(self._process_queue):
+            self.timer_registered = False
+
         if not self.timer_registered:
             bpy.app.timers.register(self._process_queue, first_interval=0.01)
             self.timer_registered = True
@@ -256,6 +260,8 @@ class ProjectionRenderThread(threading.Thread):
         self.capture_height = capture_height
         self._stop_event = threading.Event()
         self.error_message = None
+        self._finalize_queued = False
+        self._finalized = False
         
         # ABSOLUTE RESOURCE TRACKING
         self.temp_dir = temp_dir
@@ -270,16 +276,225 @@ class ProjectionRenderThread(threading.Thread):
     
     def stop(self):
         self._stop_event.set()
-        
+
+    def _queue_main_thread_finalize(self, image_data=None, apply_result=False):
+        if self._finalize_queued:
+            return
+        self._finalize_queued = True
+        if apply_result:
+            execute_in_main_thread(self._apply_result_and_finalize, image_data)
+        else:
+            execute_in_main_thread(self._finalize_main_thread)
+
+    def _set_status_sync(self, status_text: str, is_rendering: bool = None):
+        """Update UI status from the main thread only."""
+        try:
+            if hasattr(self.scene, 'gemini_render'):
+                props = self.scene.gemini_render
+                props.status_text = status_text
+                if is_rendering is not None:
+                    props.is_rendering = is_rendering
+        except Exception as e:
+            print(f"Error updating status synchronously: {e}")
+
+        try:
+            for window in bpy.context.window_manager.windows:
+                for area in window.screen.areas:
+                    if area.type == 'VIEW_3D':
+                        area.tag_redraw()
+        except Exception as redraw_error:
+            print(f"Redraw warning: {redraw_error}")
+
+    def _apply_result_and_finalize(self, image_data):
+        final_status = None
+        try:
+            if self._stop_event.is_set():
+                final_status = "Projection cancelled"
+                return
+
+            if self.source_image_override:
+                res_img = self.source_image_override
+            else:
+                print("📥 Loading result image into Blender...")
+                res_img = _load_result_image_sync(image_data, "Gemini_Projection_Result", self.user_prompt, self.cam_data)
+                if res_img:
+                    print(f"✅ Image loaded successfully: {res_img.name}")
+
+            if not res_img:
+                raise RuntimeError("Failed to load projection result image")
+
+            processed_mats = set()
+            for data in self.target_objects_data:
+                m_name = data.get('material_name', self.material_name)
+                n_name = data.get('image_node_name', self.image_node_name)
+
+                if m_name and m_name not in processed_mats:
+                    mat = bpy.data.materials.get(m_name)
+                    if mat and mat.use_nodes:
+                        node = mat.node_tree.nodes.get(n_name)
+                        if node:
+                            node.image = res_img
+                            print(f"Applied result to material: {m_name}")
+                    processed_mats.add(m_name)
+
+            if self.do_bake and not self._stop_event.is_set():
+                self._set_status_sync("🥧 Baking result...", True)
+
+                for data in self.target_objects_data:
+                    if self._stop_event.is_set():
+                        final_status = "Projection cancelled"
+                        break
+
+                    obj = bpy.data.objects.get(data['object_name'])
+                    if not obj:
+                        continue
+
+                    original_obj_name = data.get('original_object_name')
+                    if original_obj_name and self.mask_repair_data:
+                        original_tex_name = self.mask_repair_data['original_textures'].get(original_obj_name)
+                        original_tex = bpy.data.images.get(original_tex_name)
+                        if original_tex:
+                            print(f"Baking Mask Repair: {obj.name} -> {original_tex.name}")
+                            projection_utils.perform_projection_bake(
+                                context=bpy.context,
+                                obj=obj,
+                                texture_node_name=data.get('image_node_name', self.image_node_name),
+                                target_image=original_tex,
+                                src_uv_name=data['src_uv_name'],
+                                dest_uv_name=data.get('dest_uv_name', "UVMap"),
+                                is_mask_repair=True,
+                                original_obj=bpy.data.objects.get(original_obj_name),
+                                search_img=res_img
+                            )
+                    else:
+                        if '_MaskTemp' in obj.name:
+                            continue
+
+                        safe_hash = abs(hash(obj.name)) % 100000
+                        safe_name_prefix = obj.name[:30]
+                        baked_name = f"{safe_name_prefix}_{safe_hash}_{int(time.time())}_Baked_AI"
+
+                        if baked_name in bpy.data.images:
+                            bpy.data.images.remove(bpy.data.images[baked_name])
+                        baked_img = bpy.data.images.new(baked_name, res_img.size[0], res_img.size[1])
+
+                        projection_utils.perform_projection_bake(
+                            context=bpy.context,
+                            obj=obj,
+                            texture_node_name=data.get('image_node_name', self.image_node_name),
+                            target_image=baked_img,
+                            src_uv_name=data['src_uv_name'],
+                            dest_uv_name=data.get('dest_uv_name', "UVMap"),
+                            search_img=res_img
+                        )
+                        baked_img.pack()
+
+            if final_status is None:
+                final_status = "Projection cancelled" if self._stop_event.is_set() else "Ready to render"
+
+        except Exception as e:
+            print(f"Error applying projection result: {e}")
+            self.error_message = str(e)
+            final_status = f"Error: {self.error_message}"
+        finally:
+            self._finalize_main_thread(final_status)
+
+    def _cleanup_scene_sync(self):
+        try:
+            if bpy.context.edit_object or (bpy.context.object and bpy.context.object.mode != 'OBJECT'):
+                bpy.ops.object.mode_set(mode='OBJECT')
+        except Exception:
+            pass
+
+        for obj_name in self.resource_registry.get('temp_objects', []):
+            try:
+                obj = bpy.data.objects.get(obj_name)
+                if obj:
+                    mesh = obj.data
+                    bpy.data.objects.remove(obj, do_unlink=True)
+                    if mesh and mesh.users == 0:
+                        bpy.data.meshes.remove(mesh)
+                    print(f"  ✅ Deleted: {obj_name}")
+            except Exception as e:
+                print(f"  ❌ Obj Removal Error: {e}")
+
+        for mat_name in self.resource_registry.get('temp_materials', []):
+            try:
+                mat = bpy.data.materials.get(mat_name)
+                if mat:
+                    bpy.data.materials.remove(mat)
+                print(f"  ✅ Deleted material: {mat_name}")
+            except Exception as e:
+                print(f"  ❌ Mat Removal Error: {e}")
+
+        try:
+            bpy.ops.object.select_all(action='DESELECT')
+            for name in self.resource_registry.get('original_selected_objs', []):
+                obj = bpy.data.objects.get(name)
+                if obj:
+                    obj.select_set(True)
+
+            active_name = self.resource_registry.get('original_active_obj')
+            if active_name:
+                active_obj = bpy.data.objects.get(active_name)
+                if active_obj:
+                    bpy.context.view_layer.objects.active = active_obj
+            print("  ✅ Selection and Activation restored")
+        except Exception as e:
+            print(f"  ❌ Selection Restoration Error: {e}")
+
+    def _cleanup_non_blender_resources(self):
+        import shutil
+
+        for data in self.target_objects_data:
+            try:
+                if 'bm_copy' in data and data['bm_copy']:
+                    data['bm_copy'].free()
+            except Exception:
+                pass
+
+        if self.temp_dir and os.path.exists(self.temp_dir):
+            try:
+                if self.debug_mode:
+                    print(f"🐞 DEBUG MODE: Preserving directory {self.temp_dir}")
+                elif os.path.basename(self.temp_dir).startswith("gemini_proj_"):
+                    shutil.rmtree(self.temp_dir, ignore_errors=True)
+                    print(f"  ✅ Removed directory {self.temp_dir}")
+            except Exception as e:
+                print(f"  ❌ Directory cleanup error: {e}")
+
+    def _finalize_main_thread(self, status_text=None):
+        if self._finalized:
+            return
+        self._finalized = True
+
+        print(f"[GEMINI] Finalizing thread on main thread: {self.name}")
+        self._cleanup_scene_sync()
+        self._cleanup_non_blender_resources()
+
+        if hasattr(BlenderThreadManager, 'active_threads') and self in BlenderThreadManager.active_threads:
+            BlenderThreadManager.active_threads.remove(self)
+
+        from . import operators
+        if operators.GEMINI_OT_texture_projection.current_thread == self:
+            operators.GEMINI_OT_texture_projection.current_thread = None
+
+        if status_text is None:
+            if self.error_message:
+                status_text = f"Error: {self.error_message}"
+            elif self._stop_event.is_set():
+                status_text = "Projection cancelled"
+            else:
+                status_text = "Ready to render"
+
+        self._set_status_sync(status_text, False)
+
     def run(self):
         print("ProjectionRenderThread starting...")
         try:
             update_render_status(self.scene, "Sending projection to Gemini...", True)
             
-            from . import operators 
-            
             projection_prompt = f"{self.user_prompt}"
-            props = self.scene.gemini_render
             
             print(f"🚀 Projection Prompt: '{projection_prompt}'")
             print(f"📸 Source Image: {self.source_path}")
@@ -290,8 +505,7 @@ class ProjectionRenderThread(threading.Thread):
             mime_type = "image/png"
 
             if self.source_image_override:
-                print(f"🖼 Direct Image Mode...")
-                # We already have the image object, it will be used in _apply_result
+                print("🖼 Direct Image Mode...")
             elif self.bypass_api:
                 print("🛡 Simulation Mode...")
                 with open(self.sim_path, 'rb') as f:
@@ -320,198 +534,20 @@ class ProjectionRenderThread(threading.Thread):
                     except Exception as e:
                         print(f"❌ [DEBUG] Failed to save AI result: {e}")
 
-            if self._stop_event.is_set(): return
+            if self._stop_event.is_set():
+                return
 
-            def _apply_result():
-                try:
-                    if self._stop_event.is_set():
-                        print("[GEMINI] Stop detected in main thread callback. Aborting application.")
-                        return
-
-                    
-                    if self.source_image_override:
-                        print(f"🖼 Using direct image override: {self.source_image_override.name}")
-                        res_img = self.source_image_override
-                    else:
-                        print("📥 Loading result image into Blender...")
-                        # Correct signature: _load_result_image_sync(bytes, name, prompt, cam_data)
-                        res_img = _load_result_image_sync(image_data, "Gemini_Projection_Result", self.user_prompt, self.cam_data)
-                        if res_img:
-                            print(f"✅ Image loaded successfully: {res_img.name}")
-                    
-                    if res_img:
-                        if self._stop_event.is_set(): return
-                        
-                        # Apply to material
-                        # I iterate over all target objects to update their specific materials
-                        processed_mats = set()
-                        for data in self.target_objects_data:
-                            m_name = data.get('material_name', self.material_name)
-                            n_name = data.get('image_node_name', self.image_node_name)
-                            
-                            if m_name and m_name not in processed_mats:
-                                mat = bpy.data.materials.get(m_name)
-                                if mat and mat.use_nodes:
-                                    node = mat.node_tree.nodes.get(n_name)
-                                    if node:
-                                        node.image = res_img
-                                        print(f"Applied result to material: {m_name}")
-                                processed_mats.add(m_name)
-                        
-                        # Apply to Bake if needed
-                        if self.do_bake:
-                            if self._stop_event.is_set(): 
-                                print("[GEMINI] Stop before bake. Aborting.")
-                                return
-                                
-                            update_render_status(self.scene, "🥧 Baking result...", True)
-                            from . import projection_utils
-                            
-                            # RE-IMPLEMENTED MULTI-BAKE LOGIC (from threading_utils context)
-                            for data in self.target_objects_data:
-                                if self._stop_event.is_set(): break
-                                
-                                obj = bpy.data.objects.get(data['object_name'])
-                                if not obj: continue
-                                
-                                # Mask Repair or Normal Bake
-                                original_obj_name = data.get('original_object_name')
-                                if original_obj_name and self.mask_repair_data:
-                                    # MASK REPAIR BAKE
-                                    original_tex_name = self.mask_repair_data['original_textures'].get(original_obj_name)
-                                    original_tex = bpy.data.images.get(original_tex_name)
-                                    if original_tex:
-                                        print(f"Baking Mask Repair: {obj.name} -> {original_tex.name}")
-                                        projection_utils.perform_projection_bake(
-                                            context=bpy.context,
-                                            obj=obj,
-                                            texture_node_name=data.get('image_node_name', self.image_node_name),
-                                            target_image=original_tex,
-                                            src_uv_name=data['src_uv_name'],
-                                            dest_uv_name=data.get('dest_uv_name', "UVMap"),
-                                            is_mask_repair=True,
-                                            original_obj=bpy.data.objects.get(original_obj_name),
-                                            search_img=res_img
-                                        )
-                                else:
-                                    # NORMAL BAKE (AI Result -> New Baked Texture)
-                                    if '_MaskTemp' in obj.name: continue
-                                    
-                                    # Logic to create baked texture and call projection_utils.perform_projection_bake
-                                    # HASHED NAMING to prevent internal Blender collision on long names
-                                    safe_hash = abs(hash(obj.name)) % 100000
-                                    safe_name_prefix = obj.name[:30]
-                                    baked_name = f"{safe_name_prefix}_{safe_hash}_{int(time.time())}_Baked_AI"
-                                    
-                                    if baked_name in bpy.data.images:
-                                         bpy.data.images.remove(bpy.data.images[baked_name])
-                                    baked_img = bpy.data.images.new(baked_name, res_img.size[0], res_img.size[1])
-                                    
-                                    projection_utils.perform_projection_bake(
-                                        context=bpy.context,
-                                        obj=obj,
-                                        texture_node_name=data.get('image_node_name', self.image_node_name),
-                                        target_image=baked_img,
-                                        src_uv_name=data['src_uv_name'],
-                                        dest_uv_name=data.get('dest_uv_name', "UVMap"),
-                                        search_img=res_img
-                                    )
-                                    baked_img.pack()
-                        
-                        if not self._stop_event.is_set():
-                            update_render_status(self.scene, "Ready to render", False)
-                            print("Projection pipeline complete.")
-                        
-                except Exception as e:
-                    print(f"Error applying projection result: {e}")
-                    update_render_status(self.scene, f"Error: {str(e)}", False)
-
-            execute_in_main_thread(_apply_result)
+            self._queue_main_thread_finalize(
+                image_data=image_data,
+                apply_result=(self.source_image_override is not None or image_data is not None)
+            )
             
         except Exception as e:
             print(f"Projection thread error: {e}")
             self.error_message = str(e)
         finally:
-            self._perform_cleanup()
-            
-            if hasattr(BlenderThreadManager, 'active_threads') and self in BlenderThreadManager.active_threads:
-                BlenderThreadManager.active_threads.remove(self)
-            
-            from . import operators
-            if operators.GEMINI_OT_texture_projection.current_thread == self:
-                operators.GEMINI_OT_texture_projection.current_thread = None
-                
-            props = self.scene.gemini_render
-            if props.status_text == "Cancelled by user":
-                update_render_status(self.scene, "Cancelled by user", False)
-            elif self._stop_event.is_set():
-                update_render_status(self.scene, "Projection cancelled", False)
-            elif self.error_message:
-                update_render_status(self.scene, f"Error: {self.error_message}", False)
-            else:
-                if props.is_rendering:
-                    update_render_status(self.scene, "Ready to render", False)
-
-    def _perform_cleanup(self):
-        """Absolute cleanup with safety guards"""
-        import shutil
-        print(f"[GEMINI] Performing absolute cleanup for thread: {self.name}")
-        
-        def _cleanup_scene():
-            import bpy
-            try:
-                if bpy.context.edit_object or (bpy.context.object and bpy.context.object.mode != 'OBJECT'):
-                    bpy.ops.object.mode_set(mode='OBJECT')
-            except: pass
-
-            for obj_name in self.resource_registry.get('temp_objects', []):
-                try:
-                    obj = bpy.data.objects.get(obj_name)
-                    if obj:
-                        mesh = obj.data
-                        bpy.data.objects.remove(obj, do_unlink=True)
-                        if mesh and mesh.users == 0: bpy.data.meshes.remove(mesh)
-                        print(f"  ✅ Deleted: {obj_name}")
-                except Exception as e: print(f"  ❌ Obj Removal Error: {e}")
-
-            for mat_name in self.resource_registry.get('temp_materials', []):
-                try:
-                    mat = bpy.data.materials.get(mat_name)
-                    if mat: bpy.data.materials.remove(mat)
-                    print(f"  ✅ Deleted material: {mat_name}")
-                except Exception as e: print(f"  ❌ Mat Removal Error: {e}")
-
-            # 5. Restore Selection & Activation
-            try:
-                bpy.ops.object.select_all(action='DESELECT')
-                for name in self.resource_registry.get('original_selected_objs', []):
-                    obj = bpy.data.objects.get(name)
-                    if obj: obj.select_set(True)
-
-                active_name = self.resource_registry.get('original_active_obj')
-                if active_name:
-                    active_obj = bpy.data.objects.get(active_name)
-                    if active_obj:
-                        bpy.context.view_layer.objects.active = active_obj
-                print("  ✅ Selection and Activation restored")
-            except Exception as e:
-                print(f"  ❌ Selection Restoration Error: {e}")
-
-        execute_in_main_thread(_cleanup_scene)
-
-        for data in self.target_objects_data:
-            try:
-                if 'bm_copy' in data and data['bm_copy']: data['bm_copy'].free()
-            except: pass
-
-        if self.temp_dir and os.path.exists(self.temp_dir):
-            try:
-                if self.debug_mode:
-                    print(f"🐞 DEBUG MODE: Preserving directory {self.temp_dir}")
-                elif os.path.basename(self.temp_dir).startswith("gemini_proj_"):
-                    shutil.rmtree(self.temp_dir, ignore_errors=True)
-                    print(f"  ✅ Removed directory {self.temp_dir}")
-            except Exception as e: print(f"  ❌ Directory cleanup error: {e}")
+            if not self._finalize_queued:
+                self._queue_main_thread_finalize()
             
 
 def stop_all_projection_threads():
@@ -527,3 +563,13 @@ def stop_all_projection_threads():
 def stop_thread_manager():
     """Stop the thread manager (call on addon unregister)"""
     _thread_manager.stop_timer()
+
+def reset_threading_state():
+    """Reset thread/timer state after loading a new blend file."""
+    stop_all_projection_threads()
+    _thread_manager.stop_timer()
+    while not _thread_manager.command_queue.empty():
+        try:
+            _thread_manager.command_queue.get_nowait()
+        except Exception:
+            break
