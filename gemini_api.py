@@ -83,7 +83,6 @@ class GeminiAPI:
     
     def __init__(self, api_key: str, model_name: str = None):
         self.api_key = api_key
-        # I default model if not provided
         self.model = model_name if model_name else "gemini-2.5-flash-image"
         
         # I ensure model has 'models/' prefix for REST if missing

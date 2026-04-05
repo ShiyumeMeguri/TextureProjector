@@ -77,8 +77,9 @@ class GeminiRenderProperties(PropertyGroup):
         name="API Model",
         description="Choose Gemini model",
         items=[
-            ('gemini-2.5-flash-image', "Gemini 2.5 Flash", "User's preferred model ID"),
-            ('gemini-3-pro-image-preview', "Gemini 3 Pro", "Best for images, very high rate limiting"),
+            ('gemini-3.1-flash-image-preview', "Gemini 3.1 Flash", "Default free model, fast and balanced"),
+            ('gemini-3-pro-image-preview', "Gemini 3 Pro", "Highest quality, slower and more limited"),
+            ('gemini-2.5-flash-image', "Gemini 2.5 Flash", "Fast compatibility model"),
         ],
         default='gemini-2.5-flash-image'
     )

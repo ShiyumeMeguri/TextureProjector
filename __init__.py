@@ -80,7 +80,7 @@ class NanoBananaPreferences(AddonPreferences):
 
     api_key: StringProperty(
         name="API Key",
-        description="AI API Key for texture generation and repair",
+        description="Google Gemini API key for texture generation and repair",
         default="",
         subtype='PASSWORD',
     )
@@ -98,6 +98,7 @@ class NanoBananaPreferences(AddonPreferences):
         box = layout.box()
         box.label(text="API Configuration:", icon='KEYFRAME_HLT')
         box.prop(self, "api_key")
+        box.label(text="Use a Google Gemini API key", icon='INFO')
         
         # System Prompt Config
         box.label(text="Prompt Engineering:", icon='MODIFIER')
