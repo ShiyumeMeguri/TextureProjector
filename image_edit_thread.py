@@ -142,10 +142,8 @@ class ImageEditThread(threading.Thread):
         
         def load_image():
             try:
-                # Create new temp directory for result (since old one might be cleaned up)
-                import tempfile
-                result_temp_dir = tempfile.mkdtemp(prefix="nano_banana_result_")
-                result_path = os.path.join(result_temp_dir, "edited_result.png")
+                from . import threading_utils
+                result_path = threading_utils.build_output_filepath(f"{self.original_image_name}_edit")
                 
                 with open(result_path, 'wb') as f:
                     f.write(self.result_image_data)
@@ -167,8 +165,7 @@ class ImageEditThread(threading.Thread):
                 if hasattr(new_image, 'colorspace_settings'):
                     new_image.colorspace_settings.name = 'sRGB'
                     print(f"[NANO BANANA] Set colorspace to sRGB")
-                
-                new_image.pack()  # Pack into blend file
+                new_image.filepath_raw = result_path
                 
                 print(f"[NANO BANANA] Loaded result as: {new_image_name}")
                 

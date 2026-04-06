@@ -1,6 +1,8 @@
 import bpy
 import threading
 import os
+import re
+import tempfile
 from queue import Queue
 from typing import Callable, Any
 import time
@@ -9,6 +11,42 @@ import gpu
 import mathutils
 import numpy as np
 from . import projection_utils
+
+
+def get_output_directory() -> str:
+    """Return the external output directory for generated textures."""
+    if bpy.data.filepath:
+        output_dir = bpy.path.abspath("//Textures/NanoBanana")
+    else:
+        output_dir = os.path.join(tempfile.gettempdir(), "NanoBanana")
+
+    os.makedirs(output_dir, exist_ok=True)
+    return output_dir
+
+
+def _sanitize_filename(name: str) -> str:
+    sanitized = re.sub(r'[\\/:*?"<>|]+', '_', name).strip()
+    return sanitized or "image"
+
+
+def build_output_filepath(base_name: str, extension: str = ".png") -> str:
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    safe_name = _sanitize_filename(base_name)
+    return os.path.join(get_output_directory(), f"{safe_name}_{timestamp}{extension}")
+
+
+def save_blender_image(image, base_name: str = None, file_format: str = 'PNG') -> str:
+    """Save a Blender image to disk and keep its filepath pointing there."""
+    output_path = build_output_filepath(base_name or image.name, ".png")
+    original_format = image.file_format
+    try:
+        image.filepath_raw = output_path
+        image.file_format = file_format
+        image.save()
+    finally:
+        image.filepath_raw = output_path
+        image.file_format = original_format
+    return output_path
 
 class BlenderThreadManager:
     """Manager for thread-safe operations with Blender"""
@@ -122,110 +160,92 @@ def _load_result_image_sync(image_data: bytes, image_name: str = "AI_Result", us
     Returns the loaded Image object (either the history one or the Render Result copy)."""
     print(f"📥 _load_result_image_sync starting for {image_name}")
     try:
-        import tempfile
-        import os
         import datetime
         
-
-        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as f:
+        temp_path = build_output_filepath(image_name)
+        with open(temp_path, 'wb') as f:
             f.write(image_data)
-            temp_path = f.name
+        
+        # I load image into Blender
+        if image_name in bpy.data.images:
+            bpy.data.images.remove(bpy.data.images[image_name])
+        
+        img = bpy.data.images.load(temp_path)
+        img.name = image_name
+        img.filepath_raw = temp_path
         
         try:
-            # I load image into Blender
-            if image_name in bpy.data.images:
-                bpy.data.images.remove(bpy.data.images[image_name])
-            
-            img = bpy.data.images.load(temp_path)
-            img.name = image_name
-            
-            # CRITICAL: Always pack image to persist in memory before temp file is deleted
-            try:
-                # FORCE LOAD: Access pixels to ensure they are in memory
-                _ = img.pixels[0] 
-                
-                img.pack()
-                if img.packed_file:
-                    # Ensure color space is correct
-                    if hasattr(img, 'colorspace_settings'):
-                        img.colorspace_settings.name = 'sRGB'
-            except Exception as pe:
-                print(f" Warning: Failed to pack image: {pe}")
+            _ = img.pixels[0]
+            if hasattr(img, 'colorspace_settings'):
+                img.colorspace_settings.name = 'sRGB'
+        except Exception as pe:
+            print(f" Warning: Failed to finalize image: {pe}")
 
-            # I keep original image for history
-            permanent_image_for_history = None
-            if user_prompt:
-                permanent_name = f"AI_Result_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                img.name = permanent_name
-                
-                # CRITICAL: Set fake user so Blender doesn't delete it as orphan data
-                img.use_fake_user = True
-                print(f" Marked image as fake user: {permanent_name}")
-                
-                permanent_image_for_history = img
-            
+        # I keep original image for history
+        permanent_image_for_history = None
+        if user_prompt:
+            permanent_name = f"AI_Result_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            img.name = permanent_name
+            img.use_fake_user = True
+            print(f" Marked image as fake user: {permanent_name}")
+            permanent_image_for_history = img
 
-            render_result = bpy.data.images.get('Render Result')
-            if render_result:
-                bpy.data.images.remove(render_result)
-            
-            render_result = img.copy()
-            render_result.name = 'Render Result'
-            
+        render_result = bpy.data.images.get('Render Result')
+        if render_result:
+            bpy.data.images.remove(render_result)
 
-            for area in bpy.context.screen.areas:
-                if area.type == 'IMAGE_EDITOR':
-                    for space in area.spaces:
-                        if space.type == 'IMAGE_EDITOR':
-                            space.image = render_result
-                    area.tag_redraw()
+        render_result = img.copy()
+        render_result.name = 'Render Result'
+
+        for area in bpy.context.screen.areas:
+            if area.type == 'IMAGE_EDITOR':
+                for space in area.spaces:
+                    if space.type == 'IMAGE_EDITOR':
+                        space.image = render_result
+                area.tag_redraw()
+
+        # I handle Gallery history entries
+        if user_prompt:
+            scene = bpy.context.scene
+            if hasattr(scene, 'gemini_render'):
+                props = scene.gemini_render
+                item = props.render_history.add()
+                item.prompt = user_prompt
+                item.timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                item.image_name = permanent_image_for_history.name if permanent_image_for_history else render_result.name
+
+                if props.use_style_reference and props.style_reference_image:
+                    item.style_reference_used = True
+                    item.style_reference_name = props.style_reference_image.name
+
+                # I store Camera Data if available
+                if cam_data:
+                    try:
+                        item.cam_location = cam_data.get('location', (0,0,0))
+                        item.cam_rotation = cam_data.get('rotation', (1,0,0,0))
+                        item.cam_lens = cam_data.get('lens', 50.0)
+                        item.view_distance = cam_data.get('view_distance', 10.0)
+                        item.is_camera_view = cam_data.get('is_camera_view', False)
+
+                        # Store explicit camera object transform (if available)
+                        if 'cam_obj_location' in cam_data:
+                            item.cam_obj_location = cam_data['cam_obj_location']
+                        if 'cam_obj_rotation' in cam_data:
+                            item.cam_obj_rotation = cam_data['cam_obj_rotation']
+
+                        print(f" Camera data stored in history item")
+                    except Exception as ce:
+                        print(f" Failed to store camera data: {ce}")
+
+                # I cleanup old history
+                while len(props.render_history) > 10:
+                    oldest = props.render_history[0]
+                    if oldest.image_name in bpy.data.images:
+                        bpy.data.images.remove(bpy.data.images[oldest.image_name])
+                    props.render_history.remove(0)
+
+        return permanent_image_for_history or render_result
             
-            # I handle Gallery history entries
-            if user_prompt:
-                scene = bpy.context.scene
-                if hasattr(scene, 'gemini_render'):
-                    props = scene.gemini_render
-                    item = props.render_history.add()
-                    item.prompt = user_prompt
-                    item.timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    item.image_name = permanent_image_for_history.name if permanent_image_for_history else render_result.name
-                    
-                    if props.use_style_reference and props.style_reference_image:
-                        item.style_reference_used = True
-                        item.style_reference_name = props.style_reference_image.name
-                    
-                    # I store Camera Data if available
-                    if cam_data:
-                        try:
-                            item.cam_location = cam_data.get('location', (0,0,0))
-                            item.cam_rotation = cam_data.get('rotation', (1,0,0,0))
-                            item.cam_lens = cam_data.get('lens', 50.0)
-                            item.view_distance = cam_data.get('view_distance', 10.0)
-                            item.is_camera_view = cam_data.get('is_camera_view', False)
-                            
-                            # Store explicit camera object transform (if available)
-                            if 'cam_obj_location' in cam_data:
-                                item.cam_obj_location = cam_data['cam_obj_location']
-                            if 'cam_obj_rotation' in cam_data:
-                                item.cam_obj_rotation = cam_data['cam_obj_rotation']
-                                
-                            print(f" Camera data stored in history item")
-                        except Exception as ce:
-                            print(f" Failed to store camera data: {ce}")
-                    
-                    # I cleanup old history
-                    while len(props.render_history) > 10:
-                        oldest = props.render_history[0]
-                        if oldest.image_name in bpy.data.images:
-                            bpy.data.images.remove(bpy.data.images[oldest.image_name])
-                        props.render_history.remove(0)
-                        
-            return permanent_image_for_history or render_result
-            
-        finally:
-            if os.path.exists(temp_path):
-                os.unlink(temp_path)
-                
     except Exception as e:
         print(f" Error in _load_result_image_sync: {e}")
         import traceback
@@ -387,7 +407,8 @@ class ProjectionRenderThread(threading.Thread):
                             dest_uv_name=data.get('dest_uv_name', "UVMap"),
                             search_img=res_img
                         )
-                        baked_img.pack()
+                        baked_path = save_blender_image(baked_img, baked_name)
+                        print(f"Saved baked texture: {baked_path}")
 
             if final_status is None:
                 final_status = "Projection cancelled" if self._stop_event.is_set() else "Ready to render"

@@ -728,16 +728,7 @@ class NANO_BANANA_OT_convert_render_result(Operator):
             new_image_name = f"Editable_Render_{len(bpy.data.images)}"
             new_image = bpy.data.images.load(temp_path)
             new_image.name = new_image_name
-            new_image.pack() # Pack into blend file
-            
-            # Clean up temp ONLY if packing was successful
-            if new_image.packed_file:
-                try:
-                    os.remove(temp_path)
-                except:
-                    pass
-            else:
-                print(f"[NANO BANANA] Warning: Image not packed, keeping temp file: {temp_path}")
+            new_image.filepath_raw = temp_path
             
             # Switch editor to new image
             sima.image = new_image
@@ -832,15 +823,11 @@ class NANO_BANANA_OT_apply_inpaint(Operator):
             history_image = current_image.copy()
             history_image.name = f"{current_image.name}_history_{len(props.edit_history)}"
             
-            # If the image is already packed, we don't need to pack it again, 
-            # but copy() might lose the packed data reference if not careful.
-            # However, for a fresh copy, we should try to pack it to ensure it stays.
             try:
-                if not history_image.packed_file:
-                     history_image.pack() 
+                from . import threading_utils
+                threading_utils.save_blender_image(history_image, history_image.name)
             except Exception as e:
-                print(f"[NANO BANANA] Warning: Could not pack history image: {e}")
-                # If packing fails (e.g. file missing), we might still be okay if data is in memory
+                print(f"[NANO BANANA] Warning: Could not save history image: {e}")
                 pass
             
             history_item = props.edit_history.add()
@@ -859,12 +846,12 @@ class NANO_BANANA_OT_apply_inpaint(Operator):
             new_image.pixels = list(current_image.pixels[:])
             new_image.update()
             
-            # Try to pack (skip if fails - not critical)
             try:
-                new_image.pack()
-                print(f"[NANO BANANA] Packed into blend file")
-            except Exception as pack_error:
-                print(f"[NANO BANANA] Pack failed (not critical): {pack_error}")
+                from . import threading_utils
+                saved_path = threading_utils.save_blender_image(new_image, new_image.name)
+                print(f"[NANO BANANA] Saved inpaint copy: {saved_path}")
+            except Exception as save_error:
+                print(f"[NANO BANANA] Save failed (not critical): {save_error}")
             
             # Switch to duplicate
             sima.image = new_image
