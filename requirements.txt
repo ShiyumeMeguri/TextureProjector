@@ -1,8 +1,7 @@
-# Official Google Gemini AI SDK (recommended)
-google-genai>=1.0.0
-
-# PIL for image processing (required)
-Pillow>=9.0.0
-
-# Fallback dependencies (for REST API if SDK not available)
-requests>=2.25.0
+# TextureProjector 2.0 has NO required external dependencies.
+#
+# The Gemini REST API is called through Python's standard library
+# (urllib / json / base64), all image pixel handling goes through
+# Blender's own image API + numpy (bundled with Blender).
+#
+# Nothing to pip-install. This file is kept only for documentation.

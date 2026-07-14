@@ -1,240 +1,190 @@
 bl_info = {
     "name": "TextureProjector",
     "blender": (4, 2, 0),
-    "category": "3D View", 
-    "version": (1, 0, 0),
+    "category": "3D View",
+    "version": (2, 0, 0),
     "author": "ShiyumeMeguri",
-    "description": "AI-assisted texture projection and repair suite. Seamlessly project AI-generated edits and textures onto 3D meshes with automated UV management.",
+    "description": "AI texture projection with Gemini: capture, generate, "
+                   "project and bake in one click. No external dependencies.",
     "location": "3D Viewport > N Panel > Gemini",
     "doc_url": "https://github.com/ShiyumeMeguri/TextureProjector",
     "tracker_url": "https://github.com/ShiyumeMeguri/TextureProjector/issues",
 }
 
+# Development reload support.
+if "bpy" in locals():
+    import importlib
+    for _mod_name in ("gemini_api", "depth_utils", "projection_utils",
+                      "threading_utils", "history_previews", "operators",
+                      "ui_panel", "image_editor", "image_edit_thread"):
+        if _mod_name in locals():
+            importlib.reload(locals()[_mod_name])
+
 import bpy
 from bpy.app.handlers import persistent
 from bpy.types import AddonPreferences
-from bpy.props import StringProperty
-import sys
-import subprocess
-import importlib
+from bpy.props import StringProperty, BoolProperty, IntProperty
 
-def ensure_dependencies():
-    """Ensure required external libraries are installed"""
-    required_libs = [
-        ("PIL", "Pillow"),
-        ("google.genai", "google-genai"),
-        ("requests", "requests")
-    ]
-    
-    for module_name, package_name in required_libs:
-        try:
-            importlib.import_module(module_name)
-        except ImportError:
-            print(f"[NANO BANANA] {package_name} not found. Auto-installing...")
-            try:
-                subprocess.check_call([sys.executable, "-m", "pip", "install", package_name])
-                print(f"[NANO BANANA] Successfully installed {package_name}")
-                
-                # Invalidate caches to ensure newly installed package is found
-                importlib.invalidate_caches()
-            except Exception as e:
-                print(f"[NANO BANANA] Failed to auto-install {package_name}: {e}")
-
-# Ensure dependencies before importing local modules
-ensure_dependencies()
-
-
-# I reload modules for development
-if "bpy" in locals():
-    import importlib
-    if "ui_panel" in locals():
-        importlib.reload(ui_panel)
-    if "operators" in locals():
-        importlib.reload(operators)
-    if "depth_utils" in locals():
-        importlib.reload(depth_utils)
-    if "projection_utils" in locals():
-        importlib.reload(projection_utils)
-    if "gemini_api" in locals():
-        importlib.reload(gemini_api)
-    if "threading_utils" in locals():
-        importlib.reload(threading_utils)
-    from .threading_utils import BlenderThreadManager, ProjectionRenderThread
-    if "image_editor" in locals():
-        importlib.reload(image_editor)
-    if "image_edit_thread" in locals():
-        importlib.reload(image_edit_thread)
-
-# I import our modules
-from . import ui_panel
-from . import operators
+from . import gemini_api
 from . import depth_utils
 from . import projection_utils
-from . import gemini_api
 from . import threading_utils
+from . import history_previews
+from . import operators
+from . import ui_panel
 from . import image_editor
 from . import image_edit_thread
+
 
 class NanoBananaPreferences(AddonPreferences):
     bl_idname = __name__
 
     api_key: StringProperty(
         name="API Key",
-        description="Google Gemini API key for texture generation and repair",
+        description="Google Gemini API key (stored in preferences, never in "
+                    ".blend files). The GEMINI_API_KEY environment variable "
+                    "takes priority if set",
         default="",
         subtype='PASSWORD',
     )
 
-    use_system_prompts: bpy.props.BoolProperty(
+    use_system_prompts: BoolProperty(
         name="Use Optimized System Prompts",
-        description="Enable specialized system prompts for better quality (Depth/Mask adherence). If disabled, only your raw prompt is sent.",
-        default=True
+        description="Wrap requests in specialized system prompts (editable in "
+                    "system_prompts.json). Disable to send only your raw prompt",
+        default=True,
+    )
+
+    history_limit: IntProperty(
+        name="Gallery Size",
+        description="Maximum number of renders kept in the projection gallery",
+        default=10, min=1, max=100,
     )
 
     def draw(self, context):
         layout = self.layout
-        
-        # API Key section
+
         box = layout.box()
-        box.label(text="API Configuration:", icon='KEYFRAME_HLT')
+        box.label(text="API Configuration", icon='KEYINGSET')
+        import os
+        if os.environ.get('GEMINI_API_KEY', '').strip():
+            box.label(text="Using GEMINI_API_KEY environment variable",
+                      icon='CHECKMARK')
         box.prop(self, "api_key")
-        box.label(text="Use a Google Gemini API key", icon='INFO')
-        
-        # System Prompt Config
-        box.label(text="Prompt Engineering:", icon='MODIFIER')
-        row = box.row()
-        row.prop(self, "use_system_prompts", text="Enable System Prompts")
-        if not self.use_system_prompts:
-            row.label(text="(Raw Input Only)", icon='FILE_TEXT')
-        
-        # I debug section
-        box = layout.box()
-        box.label(text="Debug Tools:", icon='TOOL_SETTINGS')
-        
         row = box.row(align=True)
+        row.operator("gemini.open_api_key_url", text="Get a Free Key", icon='URL')
+        row.operator("gemini.validate_api_key", text="Test Key",
+                     icon='CHECKMARK')
 
-        try:
-            if hasattr(bpy.types, 'GEMINI_OT_reset_state'):
-                row.operator("gemini.reset_state", text="Reset UI State", icon='FILE_REFRESH')
-            if hasattr(bpy.types, 'GEMINI_OT_open_console'):  
-                row.operator("gemini.open_console", text="Open Console", icon='CONSOLE')
-        except:
-            row.label(text="Debug operators not available", icon='INFO')
-            
-        box.label(text="Note: Debug tools are also available in Blender's Console", icon='INFO')
+        box = layout.box()
+        box.label(text="Behavior", icon='PREFERENCES')
+        box.prop(self, "use_system_prompts")
+        box.prop(self, "history_limit")
 
-# I registration - Core classes first
-core_classes = (
+        box = layout.box()
+        box.label(text="Tools", icon='TOOL_SETTINGS')
+        row = box.row(align=True)
+        row.operator("gemini.open_output_dir", text="Output Folder",
+                     icon='FILE_FOLDER')
+        row.operator("gemini.reset_state", text="Reset State",
+                     icon='FILE_REFRESH')
+        row.operator("gemini.open_console", text="Console", icon='CONSOLE')
+
+
+classes = (
     NanoBananaPreferences,
+    # Property groups first.
     ui_panel.GeminiRenderHistoryItem,
     ui_panel.GeminiRenderProperties,
-    ui_panel.BANANA_PT_render_panel,
-    ui_panel.BANANA_PT_history_panel,
+    # Operators.
+    operators.GEMINI_OT_texture_projection,
+    operators.GEMINI_OT_stop_render,
+    operators.GEMINI_OT_reset_state,
+    operators.GEMINI_OT_open_console,
+    operators.GEMINI_OT_open_api_key_url,
+    operators.GEMINI_OT_open_addon_prefs,
+    operators.GEMINI_OT_validate_api_key,
+    operators.GEMINI_OT_open_output_dir,
     operators.GEMINI_OT_load_history,
+    operators.GEMINI_OT_open_history_image,
     operators.GEMINI_OT_delete_history,
     operators.GEMINI_OT_use_history_prompt,
     operators.GEMINI_OT_use_history_style,
     operators.GEMINI_OT_use_history_both,
-    operators.GEMINI_OT_history_context_menu,
-    operators.GEMINI_OT_open_history_image,
     operators.GEMINI_OT_set_projection_source,
+    operators.GEMINI_OT_history_context_menu,
     operators.GEMINI_OT_load_image_as_reference,
     operators.GEMINI_OT_load_custom_image,
     operators.GEMINI_OT_load_example_reference,
-    operators.GEMINI_OT_texture_projection,
-    operators.GEMINI_OT_stop_render,
-    operators.GEMINI_OT_open_api_key_url,
-    operators.GEMINI_OT_validate_api_key,
+    # Panels (parents before children).
+    ui_panel.BANANA_PT_render_panel,
+    ui_panel.BANANA_PT_style_panel,
+    ui_panel.BANANA_PT_options_panel,
+    ui_panel.BANANA_PT_history_panel,
 )
 
-# I optional debug classes (register separately to avoid conflicts)
-debug_classes = (
-    operators.GEMINI_OT_reset_state,
-    operators.GEMINI_OT_open_console,
-    operators.GEMINI_OT_debug_next,
-)
-
-# I all classes combined
-classes = core_classes + debug_classes
-
-def register():
-    # I register core classes first
-    for cls in core_classes:
-        try:
-            bpy.utils.register_class(cls)
-        except Exception as e:
-            print(f"Error registering core class {cls}: {e}")
-    
-    # I try to register debug classes (optional)
-    for cls in debug_classes:
-        try:
-            bpy.utils.register_class(cls)
-        except Exception as e:
-            print(f"Warning: Could not register debug class {cls}: {e}")
-            # I continue without debug classes if they fail
-    
-    # I register Image Editor module
-    try:
-        image_editor.register()
-        print(" [NANO BANANA] Image Editor panel registered")
-    except Exception as e:
-        print(f"Warning: Could not register Image Editor: {e}")
-    
-    # I add properties to scene
-    bpy.types.Scene.gemini_render = bpy.props.PointerProperty(type=ui_panel.GeminiRenderProperties)
-    
-    # I add properties to window manager for context menus
-    bpy.types.WindowManager.history_menu_index = bpy.props.IntProperty(
-        name="History Menu Index",
-        description="Index for history context menu",
-        default=0
-    )
-    
-    # Register load handler to reset status
-    from bpy.app.handlers import load_post
-    if _reset_is_rendering not in load_post:
-        load_post.append(_reset_is_rendering)
 
 @persistent
-def _reset_is_rendering(dummy1=None, dummy2=None):
-    """Reset addon runtime state on file load."""
-    import bpy
+def _reset_runtime_state(dummy1=None, dummy2=None):
+    """Reset addon runtime state whenever a .blend file is loaded.
+
+    Fixes the historical 'projection bakes black after switching files'
+    lifecycle bug: stale threads/timers from the previous file are dropped.
+    """
     threading_utils.reset_threading_state()
     operators.GEMINI_OT_texture_projection.current_thread = None
     for scene in bpy.data.scenes:
-        if hasattr(scene, 'gemini_render'):
-            scene.gemini_render.is_rendering = False
-            scene.gemini_render.status_text = "Ready to render"
-    print(" [GEMINI] Reset runtime state on file load")
+        props = getattr(scene, 'gemini_render', None)
+        if props is not None:
+            props.is_rendering = False
+            props.status_text = "Ready"
+    print("[GEMINI] Runtime state reset on file load")
+
+
+def register():
+    for cls in classes:
+        bpy.utils.register_class(cls)
+
+    image_editor.register()
+
+    bpy.types.Scene.gemini_render = bpy.props.PointerProperty(
+        type=ui_panel.GeminiRenderProperties)
+    bpy.types.WindowManager.history_menu_index = bpy.props.IntProperty(
+        name="History Menu Index", default=0)
+
+    history_previews.init_previews()
+
+    from bpy.app.handlers import load_post
+    if _reset_runtime_state not in load_post:
+        load_post.append(_reset_runtime_state)
+
 
 def unregister():
-    # I stop any background threads
+    from bpy.app.handlers import load_post
+    if _reset_runtime_state in load_post:
+        load_post.remove(_reset_runtime_state)
+
     try:
+        threading_utils.stop_all_projection_threads()
         threading_utils.stop_thread_manager()
-    except:
-        pass
-    
-    # I unregister Image Editor module
-    try:
-        image_editor.unregister()
-    except:
-        pass
-    
+    except Exception as e:
+        print(f"[GEMINI] Thread shutdown warning: {e}")
+
+    history_previews.clear_previews()
+
+    image_editor.unregister()
+
     for cls in reversed(classes):
-        bpy.utils.unregister_class(cls)
-    
-    # I remove properties from scene
+        try:
+            bpy.utils.unregister_class(cls)
+        except RuntimeError as e:
+            print(f"[GEMINI] Unregister warning for {cls.__name__}: {e}")
+
     if hasattr(bpy.types.Scene, 'gemini_render'):
         del bpy.types.Scene.gemini_render
-    
-    # I remove properties from window manager
     if hasattr(bpy.types.WindowManager, 'history_menu_index'):
         del bpy.types.WindowManager.history_menu_index
-        
-    # Remove load handler
-    from bpy.app.handlers import load_post
-    if _reset_is_rendering in load_post:
-        load_post.remove(_reset_is_rendering)
+
 
 if __name__ == "__main__":
     register()

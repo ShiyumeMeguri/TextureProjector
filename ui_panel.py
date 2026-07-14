@@ -1,471 +1,357 @@
+"""
+UI for TextureProjector.
+
+Blender-native UX: property split layouts, icon-driven labels, one big
+primary action, collapsible sub-panels, and a thumbnail gallery.
+
+History item property names are kept identical to v1 so existing .blend
+files keep their gallery data.
+"""
+
 import bpy
-from bpy.types import PropertyGroup, Panel
-from bpy.props import StringProperty, BoolProperty, EnumProperty, FloatProperty, IntProperty, CollectionProperty, PointerProperty, FloatVectorProperty
+from bpy.types import Panel, PropertyGroup
+from bpy.props import (StringProperty, BoolProperty, EnumProperty, FloatProperty,
+                       IntProperty, CollectionProperty, PointerProperty,
+                       FloatVectorProperty)
+
+from . import gemini_api
+from . import history_previews
+
 
 class GeminiRenderHistoryItem(PropertyGroup):
-    """Single render history entry with visual preview"""
-    
-    prompt: StringProperty(
-        name="Prompt",
-        description="Prompt used for this render",
-        default=""
-    )
-    
-    timestamp: StringProperty(
-        name="Timestamp", 
-        description="When this render was created",
-        default=""
-    )
-    
-    image_name: StringProperty(
-        name="Image Name",
-        description="Name of the generated image in Blender",
-        default=""
-    )
-    
-    # Visual preview data
-    thumbnail_name: StringProperty(
-        name="Thumbnail Name",
-        description="Name of thumbnail image in bpy.data.images",
-        default=""
-    )
-    
-    # Style reference data
-    style_reference_used: BoolProperty(
-        name="Style Reference Used",
-        description="Whether style reference was used for this render",
-        default=False
-    )
-    
-    style_reference_name: StringProperty(
-        name="Style Reference Name",
-        description="Name of style reference image used",
-        default=""
-    )
-    
-    style_reference_thumbnail: StringProperty(
-        name="Style Reference Thumbnail",
-        description="Name of style reference thumbnail in bpy.data.images",
-        default=""
-    )
-    
+    """Single render history entry (names frozen for .blend compatibility)."""
+
+    prompt: StringProperty(name="Prompt", default="")
+    timestamp: StringProperty(name="Timestamp", default="")
+    image_name: StringProperty(name="Image Name", default="")
+    thumbnail_name: StringProperty(name="Thumbnail Name", default="")
+
+    style_reference_used: BoolProperty(name="Style Reference Used", default=False)
+    style_reference_name: StringProperty(name="Style Reference Name", default="")
+    style_reference_thumbnail: StringProperty(name="Style Reference Thumbnail",
+                                              default="")
+
     is_camera_view: BoolProperty(name="Is Camera View", default=False)
-    
-    # Viewport/View3D State (Standard)
+
+    # Viewport state
     cam_location: FloatVectorProperty(name="View Location", size=3)
-    cam_rotation: FloatVectorProperty(name="View Rotation", size=4) # Quaternion
+    cam_rotation: FloatVectorProperty(name="View Rotation", size=4)  # Quaternion
     cam_lens: FloatProperty(name="Lens", default=50.0)
     view_distance: FloatProperty(name="View Distance", default=10.0)
 
-    # Actual Camera Object State (For Camera View pixel consistency)
+    # Camera object state (for pixel-consistent camera-view restore)
     cam_obj_location: FloatVectorProperty(name="Camera Obj Location", size=3)
-    cam_obj_rotation: FloatVectorProperty(name="Camera Obj Rotation", size=3) # Euler XYZ
+    cam_obj_rotation: FloatVectorProperty(name="Camera Obj Rotation", size=3)  # Euler
+
 
 class GeminiRenderProperties(PropertyGroup):
-    """Properties for Gemini Render addon stored in scene"""
-    
-    # Main properties
-    api_key: StringProperty(
-        name="API Key",
-        description="Google Gemini API Key",
-        default="",
-        subtype='PASSWORD',
-        update=lambda self, context: sync_api_key(self, context)
-    )
-    
+    """Scene-level settings for the projector."""
+
+    # Legacy only: old versions stored the key here (inside the .blend).
+    # It is no longer shown in the UI; gemini_api.get_api_key() still reads
+    # it as a last resort so old files keep working.
+    api_key: StringProperty(name="API Key (legacy)", default="",
+                            subtype='PASSWORD')
+
     model_name: EnumProperty(
-        name="API Model",
-        description="Choose Gemini model",
+        name="Model",
+        description="Gemini image model",
         items=[
-            ('gemini-3.1-flash-image-preview', "Gemini 3.1 Flash", "Default free model, fast and balanced"),
-            ('gemini-3-pro-image-preview', "Gemini 3 Pro", "Highest quality, slower and more limited"),
-            ('gemini-2.5-flash-image', "Gemini 2.5 Flash", "Fast compatibility model"),
+            ('gemini-3.1-flash-image-preview', "Gemini 3.1 Flash (Free)",
+             "Default free model, fast and balanced"),
+            ('gemini-3-pro-image-preview', "Gemini 3 Pro",
+             "Highest quality, slower and more rate-limited"),
+            ('gemini-2.5-flash-image', "Gemini 2.5 Flash",
+             "Legacy compatibility model"),
         ],
-        default='gemini-2.5-flash-image'
+        default='gemini-3.1-flash-image-preview',
     )
-    
+
     prompt: StringProperty(
-        name="Prompt", 
-        description="Describe how you want the depth map to be transformed",
+        name="Prompt",
+        description="Describe the texture you want",
         default="Make this photorealistic with detailed materials and proper lighting",
         maxlen=1000,
     )
-    
-    render_history: CollectionProperty(
-        type=GeminiRenderHistoryItem,
-        name="Render History"
-    )
-    
-    history_index: IntProperty(
-        name="History Index",
-        default=-1,
-    )
-    
 
-    
-    resolution: EnumProperty(
-        name="Resolution",
-        description="Choose render resolution",
-        items=[
-            ('1024', "1k (1024x1024)", "Standard square resolution"),
-            ('2048', "2k (2048x2048)", "High resolution"),
-            ('4096', "4k (4096x4096)", "Ultra high resolution"),
-        ],
-        default='1024',
-    )
-    
+    render_history: CollectionProperty(type=GeminiRenderHistoryItem,
+                                       name="Render History")
+    history_index: IntProperty(name="History Index", default=-1)
 
-    
-    # I style Reference Image (optional)
     use_style_reference: BoolProperty(
-        name="Use Style Reference",
-        description="Use a reference image to maintain style/materials",
-        default=False
-    )
-    
-    style_reference_image: PointerProperty(
-        type=bpy.types.Image,
         name="Style Reference",
-        description="Reference image to maintain similar style/materials/lighting"
-    )
-    
+        description="Guide materials/colors with a reference image",
+        default=False)
+    style_reference_image: PointerProperty(
+        type=bpy.types.Image, name="Reference",
+        description="Reference image for style/material/lighting guidance")
     use_viewport_as_reference: BoolProperty(
         name="Use Viewport as Reference",
-        description="Automatically use current viewport screenshot as style reference (ignores mask)",
-        default=False
-    )
-    
-    # UI state
-    show_settings: BoolProperty(
-        name="Show Settings",
-        description="Show advanced settings",
-        default=False,
-    )
-    
-    show_auth: BoolProperty(
-        name="Show Authentication",
-        description="Show authentication panel",
-        default=True,
-    )
-    
-    # Status
-    status_text: StringProperty(
-        name="Status",
-        description="Current operation status",
-        default="Ready to render",
-        options={'SKIP_SAVE'},
-    )
-    
-    is_rendering: BoolProperty(
-        name="Is Rendering",
-        description="Whether AI render is in progress",
-        default=False,
-        options={'SKIP_SAVE'},
-    )
-    # Projection settings
+        description="Capture a clean viewport screenshot as the style reference",
+        default=False)
+
+    show_settings: BoolProperty(name="Show Settings", default=False)
+
+    status_text: StringProperty(name="Status", default="Ready",
+                                options={'SKIP_SAVE'})
+    is_rendering: BoolProperty(name="Is Rendering", default=False,
+                               options={'SKIP_SAVE'})
+
     input_source: EnumProperty(
-        name="Input Source",
-        description="What to capture and send to AI (only used when Projection Source = AI)",
+        name="Capture",
+        description="What to capture and send to the AI",
         items=[
-            ('COLOR', "Viewport Screenshot", "Capture current viewport color"),
-            ('DEPTH', "Depth Map", "Capture depth information"),
+            ('COLOR', "Viewport Color", "Send a color capture of the view"),
+            ('DEPTH', "Depth Map", "Send a normalized depth capture"),
         ],
-        default='COLOR'
-    )
-    
+        default='COLOR')
+
     projection_source: EnumProperty(
-        name="Projection Source",
+        name="Source",
         description="Where the projected texture comes from",
         items=[
-            ('AI', "AI Generated", "Generate texture using AI from captured input"),
-            ('IMAGE', "Custom Texture", "Use a selected image directly"),
-            ('VIEW', "Viewport Capture", "Directly project the current viewport screenshot"),
-            ('GRID', "Grid", "Use wireframe grid for alignment testing"),
+            ('AI', "AI Generated", "Generate the texture with Gemini", 'SHADERFX', 0),
+            ('IMAGE', "Custom Image", "Project a chosen image directly",
+             'IMAGE_DATA', 1),
+            ('VIEW', "Viewport Capture", "Project the current view directly",
+             'RESTRICT_VIEW_OFF', 2),
+            ('GRID', "Grid (Test)", "Project a wireframe grid for alignment testing",
+             'MESH_GRID', 3),
         ],
-        default='AI'
-    )
-    
+        default='AI')
+
     projection_image: PointerProperty(
-        type=bpy.types.Image,
-        name="Projection Image",
-        description="Custom image to project onto the mesh"
-    )
-    
-    # Projection settings
+        type=bpy.types.Image, name="Image",
+        description="Custom image to project onto the mesh")
+
     projection_bake: BoolProperty(
-        name="Bake to UVs",
-        description="Bake the projected texture back to the object's original UV layout",
-        default=True,
-    )
-    
-    # Mask Repair Mode settings
+        name="Bake to Original UVs",
+        description="Bake the projection back into the object's own UV layout",
+        default=True)
+
+    bake_uv_name: StringProperty(
+        name="Bake UV",
+        description="UV map to bake into. Leave empty for the first UV map "
+                    "(UV0). A named map that does not exist is created",
+        default="")
+
     mask_repair_mode: BoolProperty(
         name="Mask Repair Mode",
-        description="Use mask-based incremental texture repair - selected faces are masked and AI repairs only that region",
-        default=False,
-    )
+        description="Repair only the selected faces: they are masked and the AI "
+                    "regenerates just that region of the existing texture",
+        default=False)
     mask_color: FloatVectorProperty(
-        name="Mask Color",
-        description="Color used for mask rendering (default: red)",
-        subtype='COLOR',
-        size=4,
-        min=0.0,
-        max=1.0,
-        default=(1.0, 0.0, 0.0, 1.0),
-    )
-    
-    # Debug Mode
+        name="Mask Color", subtype='COLOR', size=4,
+        min=0.0, max=1.0, default=(1.0, 0.0, 0.0, 1.0))
+
     debug_mode: BoolProperty(
         name="Debug Mode",
-        description="Enable manual step-by-step debugging and export debug images to 'textures' folder",
-        default=False
-    )
-    
-    debug_step: IntProperty(
-        name="Debug Step",
-        default=0,
-        options={'SKIP_SAVE'}
-    )
+        description="Keep all intermediate images in a persistent "
+                    "'textures/gemini_debug_session' folder next to the .blend",
+        default=False)
+
+
+# ---------------------------------------------------------------------------
+# Panels
+# ---------------------------------------------------------------------------
 
 class BANANA_PT_render_panel(Panel):
-    """Main Texture Projector Panel"""
-    bl_label = "Gemini Texture Projector"
+    """Main projector panel."""
+    bl_label = "Texture Projector"
     bl_idname = "BANANA_PT_render_panel"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "Gemini"
-    
+
     def draw(self, context):
         layout = self.layout
-        scene = context.scene
-        props = scene.gemini_render
-        
-        # Auto-sync API key from preferences if scene key is empty
-        if not props.api_key:
-            try:
-                # Use current package name for metadata
-                package_name = __package__ if __package__ else "nano_banana_render"
-                addon_prefs = context.preferences.addons.get(package_name)
-                if addon_prefs and hasattr(addon_prefs.preferences, 'api_key') and addon_prefs.preferences.api_key:
-                    props.api_key = addon_prefs.preferences.api_key
-            except:
-                pass
-        
-        # Authentication (collapsible)
-        box = layout.box()
-        row = box.row(align=True)
-        row.prop(props, "show_auth", 
-                text="🔑 Authentication" if not props.show_auth else "🔑 Hide Authentication",
-                toggle=True, icon='TRIA_DOWN' if props.show_auth else 'TRIA_RIGHT')
-        
-        if props.show_auth:
-            box.prop(props, "api_key", text="")
-            
-            # Model selection
-            box.label(text="Model Selection:", icon='NODE_SEL')
-            box.prop(props, "model_name", text="")
-            
-            if not props.api_key.strip():
-                box.label(text="Enter API key", icon='ERROR')
-        
-        # Settings toggle
-        row = layout.row()
-        row.prop(props, "show_settings", 
-                text="Settings" if not props.show_settings else "Hide Settings",
-                toggle=True, icon='PREFERENCES')
-        
-        if props.show_settings:
-            box = layout.box()
-            
-            # System Prompt Config
-            try:
-                package_name = __package__ if __package__ else "nano_banana_render"
-                addon_prefs = context.preferences.addons.get(package_name)
-                if addon_prefs:
-                    box.prop(addon_prefs.preferences, "use_system_prompts", text="Enable System Prompts")
-            except:
-                pass
+        props = context.scene.gemini_render
 
-            # Debug options
-            box.label(text="Debug:", icon='TOOL_SETTINGS')
-            box.prop(props, "debug_mode", text="Manual Debug Mode")
-            
-            if props.debug_mode:
-                debug_box = box.box()
-                step_text = f"Next Debug Step ({props.debug_step})"
-                debug_box.operator("gemini.debug_next", text=step_text, icon='PLAY')
-                debug_box.label(text=f"Step {props.debug_step}: Check logs", icon='CONSOLE')
-        
-        # Texture Projection Section
-        layout.separator()
-        box = layout.box()
-        box.label(text="Texture Projection", icon='MOD_UVPROJECT')
-        
-        # Projection Source (what to project)
-        proj_box = box.box()
-        proj_box.label(text="Projection Source:", icon='MOD_UVPROJECT')
-        proj_box.prop(props, "projection_source", text="")
-        
-        # Show options based on projection source
-        if props.projection_source == 'AI':
-            # AI Input type
-            input_row = proj_box.row()
-            input_row.label(text="Capture:")
-            input_row.prop(props, "input_source", text="")
-            
-            # Prompt
-            proj_box.label(text="Prompt:", icon='TEXT')
-            proj_box.prop(props, "prompt", text="")
-            
-            # Style Reference
-            style_row = proj_box.row()
-            style_row.prop(props, "use_style_reference", text="Use Style Reference")
-            if props.use_style_reference:
-                # Viewport Reference Option
-                proj_box.prop(props, "use_viewport_as_reference")
-                
-                if not props.use_viewport_as_reference:
-                    proj_box.prop(props, "style_reference_image", text="Reference")
-                    load_row = proj_box.row()
-                    load_row.operator("gemini.load_image_as_reference", text="Load Image", icon='FILEBROWSER')
-                else:
-                    proj_box.label(text="Viewport will be captured as style reference", icon='VIEW_CAMERA')
-        elif props.projection_source == 'IMAGE':
-            proj_box.prop(props, "projection_image", text="Image")
-            load_row = proj_box.row()
-            load_row.operator("gemini.load_custom_image", text="Load Image", icon='FILEBROWSER')
-            if not props.projection_image:
-                proj_box.label(text="Select an image to project", icon='ERROR')
-        
-        # Main Project Button
-        proj_col = box.column(align=True)
-        proj_col.scale_y = 2.0
-        
+        # Busy state: status + stop.
         if props.is_rendering:
-            # Keep enabled so user can stop
-            proj_col.operator("gemini.stop_render", text="Stop Processing...", icon='CANCEL')
-        else:
-            btn_text = "Project Texture"
-            if props.projection_source == 'AI':
-                btn_text = "AI Texture Projection"
-            elif props.projection_source == 'GRID':
-                btn_text = "Grid Projection (Test)"
-            proj_col.operator("gemini.texture_projection", text=btn_text, icon='MOD_UVPROJECT')
-        
-        # Options
-        row = box.row()
-        row.prop(props, "projection_bake", text="Bake to Original UVs")
-        
-        # Mask Repair Mode
-        row = box.row()
-        row.prop(props, "mask_repair_mode", text="Mask Repair Mode")
-        if props.mask_repair_mode:
-            color_row = box.row()
-            color_row.prop(props, "mask_color", text="Mask Color")
-        
-        # Validation feedback
+            box = layout.box()
+            box.label(text=props.status_text, icon='TIME')
+            row = box.row()
+            row.scale_y = 1.4
+            row.operator("gemini.stop_render", text="Stop", icon='CANCEL')
+
+        # API key onboarding (only blocks the AI source).
+        needs_key = props.projection_source == 'AI' and not gemini_api.get_api_key()
+        if needs_key:
+            box = layout.box()
+            box.alert = True
+            box.label(text="No API key configured", icon='ERROR')
+            row = box.row(align=True)
+            row.operator("gemini.open_api_key_url", text="Get Key", icon='URL')
+            row.operator("gemini.open_addon_prefs", text="Preferences",
+                         icon='PREFERENCES')
+
+        col = layout.column()
+        col.use_property_split = True
+        col.use_property_decorate = False
+        col.prop(props, "projection_source")
+
+        if props.projection_source == 'AI':
+            col.prop(props, "model_name")
+            col.prop(props, "input_source")
+            layout.separator()
+            layout.label(text="Prompt", icon='TEXT')
+            layout.prop(props, "prompt", text="")
+        elif props.projection_source == 'IMAGE':
+            col.prop(props, "projection_image")
+            row = layout.row()
+            row.operator("gemini.load_custom_image", text="Load Image",
+                         icon='FILEBROWSER')
+            if not props.projection_image:
+                layout.label(text="Select an image to project", icon='INFO')
+
+        # Primary action.
+        layout.separator()
+        action = layout.column(align=True)
+        action.scale_y = 1.8
+        action.enabled = not props.is_rendering
+        labels = {
+            'AI': "AI Texture Projection",
+            'IMAGE': "Project Image",
+            'VIEW': "Project Viewport",
+            'GRID': "Grid Projection (Test)",
+        }
+        action.operator("gemini.texture_projection",
+                        text=labels[props.projection_source],
+                        icon='MOD_UVPROJECT')
+
+        # Contextual hint (one-click semantics).
         obj = context.active_object
         if not obj or obj.type != 'MESH':
-            box.label(text="Select a mesh object", icon='ERROR')
-        elif obj.mode != 'EDIT':
-            box.label(text="Enter Edit Mode to project", icon='EDITMODE_HLT')
+            layout.label(text="Select a mesh object", icon='ERROR')
+        elif context.mode == 'EDIT_MESH':
+            layout.label(text="Projecting selected faces", icon='FACESEL')
         else:
-             box.label(text="Select faces to project onto", icon='FACESEL')
-        
-        # Status
-        layout.separator()
-        box = layout.box()
-        status_icon = 'INFO' if not props.is_rendering else 'TIME'
-        box.label(text=props.status_text, icon=status_icon)
-        
+            layout.label(text="Projecting all faces (Edit Mode to limit)",
+                         icon='OBJECT_DATA')
 
+        if not props.is_rendering and props.status_text not in {"", "Ready"}:
+            layout.label(text=props.status_text, icon='INFO')
+
+
+class BANANA_PT_style_panel(Panel):
+    """Style reference sub-panel."""
+    bl_label = "Style Reference"
+    bl_idname = "BANANA_PT_style_panel"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Gemini"
+    bl_parent_id = "BANANA_PT_render_panel"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.scene.gemini_render.projection_source == 'AI'
+
+    def draw_header(self, context):
+        self.layout.prop(context.scene.gemini_render, "use_style_reference",
+                         text="")
+
+    def draw(self, context):
+        layout = self.layout
+        props = context.scene.gemini_render
+        layout.enabled = props.use_style_reference
+
+        layout.prop(props, "use_viewport_as_reference")
+        if not props.use_viewport_as_reference:
+            layout.prop(props, "style_reference_image", text="")
+            row = layout.row(align=True)
+            row.operator("gemini.load_image_as_reference", text="Load Image",
+                         icon='FILEBROWSER')
+            row.operator("gemini.load_example_reference", text="",
+                         icon='SHADERFX')
+        else:
+            layout.label(text="A clean viewport capture will be used",
+                         icon='RESTRICT_VIEW_OFF')
+
+
+class BANANA_PT_options_panel(Panel):
+    """Projection options sub-panel."""
+    bl_label = "Options"
+    bl_idname = "BANANA_PT_options_panel"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Gemini"
+    bl_parent_id = "BANANA_PT_render_panel"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        layout = self.layout
+        props = context.scene.gemini_render
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+
+        layout.prop(props, "projection_bake")
+        sub = layout.column()
+        sub.enabled = props.projection_bake
+        sub.prop(props, "bake_uv_name", icon='UV')
+        layout.prop(props, "mask_repair_mode")
+        if props.mask_repair_mode:
+            layout.prop(props, "mask_color")
+
+        layout.separator()
+        layout.prop(props, "debug_mode")
+        row = layout.row(align=True)
+        row.operator("gemini.open_output_dir", text="Output Folder",
+                     icon='FILE_FOLDER')
+        row.operator("gemini.reset_state", text="Reset", icon='FILE_REFRESH')
 
 
 class BANANA_PT_history_panel(Panel):
-    """Visual gallery render history panel"""
-    bl_label = "Projection Gallery" 
+    """Thumbnail gallery of previous generations."""
+    bl_label = "Projection Gallery"
     bl_idname = "BANANA_PT_history_panel"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "Gemini"
     bl_parent_id = "BANANA_PT_render_panel"
-    
+    bl_options = {'DEFAULT_CLOSED'}
+
     def draw(self, context):
         layout = self.layout
-        scene = context.scene
-        props = scene.gemini_render
-        
+        props = context.scene.gemini_render
+
         if len(props.render_history) == 0:
             box = layout.box()
-            box.label(text=" No renders yet", icon='INFO')
-            box.label(text="Generate AI renders to see gallery")
+            box.label(text="No renders yet", icon='INFO')
             return
-        
-        # I gallery header
-        header_row = layout.row(align=True)
-        header_row.label(text=f"Gallery ({len(props.render_history)} renders)", icon='IMAGE_DATA')
-        
-        layout.separator()
-        
-        # I gallery grid - newest first
+
+        layout.label(text=f"{len(props.render_history)} renders",
+                     icon='IMAGE_DATA')
+
         for i, item in enumerate(reversed(props.render_history)):
             actual_index = len(props.render_history) - 1 - i
-            render_number = len(props.render_history) - i  # I numbered from newest
-            
-            # I compact render card with proper structure
+
             card = layout.box()
-            card.scale_y = 0.9
-            
-            # I row 1: Date and render number (compact)
-            date_row = card.row()
-            date_row.scale_y = 0.6
-            date_row.label(text=f"# {render_number} • {item.timestamp}", icon='TIME')
-            
-            # I row 2: Buttons - View button (big) + Gear button (small, right)
+
+            icon_id = history_previews.get_preview_icon_id(
+                image_name=item.image_name)
+            if icon_id:
+                card.template_icon(icon_value=icon_id, scale=5.0)
+
+            header = card.row(align=True)
+            header.label(text=f"#{len(props.render_history) - i}  {item.timestamp}",
+                         icon='TIME')
+
             btn_row = card.row(align=True)
             btn_row.scale_y = 1.2
-            
-            # I view photo button (takes most space)
-            view_btn = btn_row.operator("gemini.open_history_image", text=" View Photo", icon='ZOOM_IN')
-            view_btn.history_index = actual_index
-            
-            # I gear button (small, just icon, right side)
-            gear_btn = btn_row.operator("gemini.history_context_menu", text="", icon='PREFERENCES', emboss=False)
-            gear_btn.history_index = actual_index
-            
-            # I row 3: Prompt (styled exactly like style reference help text)
-            prompt_preview = item.prompt[:70] + "..." if len(item.prompt) > 70 else item.prompt
-            help_box = card.box() 
-            help_box.scale_y = 0.7
-            help_box.label(text=prompt_preview, icon='TEXT')
-            
-            # I minimal separator between items
-            if i < len(props.render_history) - 1:
-                layout.separator()
+            btn_row.operator("gemini.open_history_image", text="View",
+                             icon='ZOOM_IN').history_index = actual_index
+            btn_row.operator("gemini.use_history_prompt", text="",
+                             icon='TEXT').history_index = actual_index
+            btn_row.operator("gemini.set_projection_source", text="",
+                             icon='MOD_UVPROJECT').history_index = actual_index
+            btn_row.operator("gemini.delete_history", text="",
+                             icon='TRASH').history_index = actual_index
 
-
-
-
-
-
-def sync_api_key(self, context):
-    """Sync API key between scene properties and addon preferences"""
-    try:
-        import bpy
-        
-
-        package_name = __package__ if __package__ else "nano_banana_render"
-        addon_prefs = context.preferences.addons.get(package_name)
-        
-        if addon_prefs and hasattr(addon_prefs.preferences, 'api_key'):
-            # I sync scene -> preferences
-            if self.api_key and self.api_key != addon_prefs.preferences.api_key:
-                addon_prefs.preferences.api_key = self.api_key
-                print(f" API key synced to preferences")
-            # I sync preferences -> scene (if scene is empty)
-            elif not self.api_key and addon_prefs.preferences.api_key:
-                self.api_key = addon_prefs.preferences.api_key
-                print(f" API key synced from preferences")
-        
-    except Exception as e:
-        print(f" Failed to sync API key: {e}")
+            if item.prompt:
+                preview = (item.prompt[:70] + "...") if len(item.prompt) > 70 \
+                    else item.prompt
+                sub = card.row()
+                sub.scale_y = 0.7
+                sub.label(text=preview, icon='TEXT')

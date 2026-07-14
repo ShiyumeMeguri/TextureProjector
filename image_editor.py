@@ -1,1030 +1,643 @@
 """
-Image Editor panel for post-render editing with AI
-Supports mask-based inpainting, style changes, and iterative refinement
+Image Editor integration: AI post-editing of generated (or any) images.
+
+Supports iterative refinement, reference-guided object placement and
+sketch-based inpainting. All pixel handling is numpy vectorized via
+foreach_get/foreach_set (the old list(image.pixels) path copied every
+pixel through Python twice).
 """
 
-import bpy
 import os
-import time
-from typing import Optional
+import tempfile
+from datetime import datetime
+
+import numpy as np
+import bpy
 from bpy.types import Panel, PropertyGroup, Operator
-from bpy.props import StringProperty, BoolProperty, CollectionProperty, IntProperty, PointerProperty
+from bpy.props import (StringProperty, BoolProperty, CollectionProperty,
+                       IntProperty, PointerProperty, FloatVectorProperty,
+                       EnumProperty)
+
 
 class EditHistoryItem(PropertyGroup):
-    """Single edit in the session history"""
-    
-    prompt: StringProperty(
-        name="Edit Prompt",
-        description="Prompt used for this edit",
-        default=""
-    )
-    
-    image_name: StringProperty(
-        name="Image Name",
-        description="Name of image in bpy.data.images",
-        default=""
-    )
-    
-    timestamp: StringProperty(
-        name="Timestamp",
-        description="When this edit was made",
-        default=""
-    )
-    
-    has_mask: BoolProperty(
-        name="Has Mask",
-        description="Whether this edit used a mask",
-        default=False
-    )
+    prompt: StringProperty(name="Edit Prompt", default="")
+    image_name: StringProperty(name="Image Name", default="")
+    timestamp: StringProperty(name="Timestamp", default="")
+    has_mask: BoolProperty(name="Has Mask", default=False)
+
+
+def _update_brush_settings(self, context):
+    """Push panel brush settings into the active image-paint brush."""
+    try:
+        ts = context.tool_settings
+        paint = getattr(ts, 'image_paint', None)
+        if paint and paint.brush:
+            paint.brush.size = self.brush_size
+            paint.brush.color = self.brush_color
+            if hasattr(ts, 'unified_paint_settings'):
+                ts.unified_paint_settings.size = self.brush_size
+                ts.unified_paint_settings.color = self.brush_color
+    except Exception as e:
+        print(f"[GEMINI] Brush update error: {e}")
+
 
 class ImageEditorProperties(PropertyGroup):
-    """Properties for Image Editor panel - stored in WindowManager for session persistence"""
-    
-    # Current edit prompt
+    """Session-scoped editor state (WindowManager, never saved in .blend)."""
+
     edit_prompt: StringProperty(
         name="Edit Prompt",
-        description="Describe what you want to change in the image",
-        default="",
-        maxlen=500
-    )
-    
-    # Session history (kept in memory only - not saved in blend file)
-    edit_history: CollectionProperty(
-        type=EditHistoryItem,
-        name="Edit History"
-    )
-    
-    history_index: IntProperty(
-        name="History Index",
-        default=-1
-    )
-    
-    # Current image being edited
-    active_image: StringProperty(
-        name="Active Image",
-        description="Name of image currently being edited",
-        default=""
-    )
-    
-    # Original render context (to preserve settings)
-    original_prompt: StringProperty(
-        name="Original Prompt",
-        description="Original prompt from initial render",
-        default=""
-    )
-    
-    # Style reference for editing
-    use_reference_image: BoolProperty(
-        name="Use Reference Image",
-        description="Add objects or people from reference image to your scene",
-        default=False
-    )
-    
-    reference_image: PointerProperty(
-        type=bpy.types.Image,
-        name="Reference Image",
-        description="Image containing object/person to add (works with inpainting to place at specific location)"
-    )
-    
-    # Inpainting mode
-    use_inpainting: BoolProperty(
-        name="Use Inpainting",
-        description="Draw what you want AI to create (inpainting)",
-        default=False
-    )
-    
-    # Paint brush settings
-    brush_size: bpy.props.IntProperty(
-        name="Brush Size",
-        description="Size of paint brush for masking",
-        default=50,
-        min=1,
-        max=500,
-        update=lambda self, context: update_brush_settings(self, context)
-    )
-    
-    brush_color: bpy.props.FloatVectorProperty(
-        name="Brush Color",
-        description="Color for painting mask (white = edit area)",
-        subtype='COLOR',
-        default=(1.0, 1.0, 1.0),
-        min=0.0,
-        max=1.0,
-        update=lambda self, context: update_brush_settings(self, context)
-    )
-    
-    # UI state
-    show_history: BoolProperty(
-        name="Show History",
-        description="Show edit history",
-        default=False
-    )
-    
-    # Status
-    is_editing: BoolProperty(
-        name="Is Editing",
-        description="Whether AI edit is in progress",
-        default=False
-    )
-    
-    # Resolution selection for editing
-    resolution: bpy.props.EnumProperty(
-        name="Resolution",
-        description="Choose output resolution for the edit",
-        items=[
-            ('AUTO', "Auto (Match Input)", "Keep original resolution"),
-            ('1024', "1k (1024x1024)", "Force 1k resolution"),
-            ('2048', "2k (2048x2048)", "Force 2k resolution"),
-            ('4096', "4k (4096x4096)", "Force 4k resolution"),
-        ],
-        default='AUTO',
-    )
-    
-    # Status
-    status_text: StringProperty(
-        name="Status",
-        description="Current operation status",
-        default="Ready to edit"
-    )
+        description="Describe what to change in the image",
+        default="", maxlen=500)
 
+    edit_history: CollectionProperty(type=EditHistoryItem, name="Edit History")
+    history_index: IntProperty(name="History Index", default=-1)
+
+    active_image: StringProperty(name="Active Image", default="")
+    original_prompt: StringProperty(name="Original Prompt", default="")
+
+    use_reference_image: BoolProperty(
+        name="Reference Image",
+        description="Add an object/person from a reference image to the scene",
+        default=False)
+    reference_image: PointerProperty(
+        type=bpy.types.Image, name="Reference",
+        description="Image containing the object to add (combine with "
+                    "inpainting to control placement)")
+
+    use_inpainting: BoolProperty(
+        name="Inpainting",
+        description="Paint a rough guide of what the AI should create",
+        default=False)
+
+    brush_size: IntProperty(
+        name="Brush Size", default=50, min=1, max=500,
+        update=_update_brush_settings)
+    brush_color: FloatVectorProperty(
+        name="Brush Color", subtype='COLOR',
+        default=(1.0, 1.0, 1.0), min=0.0, max=1.0,
+        update=_update_brush_settings)
+
+    show_history: BoolProperty(name="Show History", default=False)
+    is_editing: BoolProperty(name="Is Editing", default=False)
+
+    resolution: EnumProperty(
+        name="Resolution",
+        description="Output resolution for the edit",
+        items=[
+            ('AUTO', "Auto (Match Input)", "Keep the original resolution tier"),
+            ('1024', "1K", "Force 1K output"),
+            ('2048', "2K", "Force 2K output"),
+            ('4096', "4K", "Force 4K output"),
+        ],
+        default='AUTO')
+
+    status_text: StringProperty(name="Status", default="Ready to edit")
+
+
+# ---------------------------------------------------------------------------
+# Pixel helpers (numpy)
+# ---------------------------------------------------------------------------
+
+def _read_pixels(image) -> np.ndarray:
+    """Image pixels as (H, W, C) float32 via the C-speed foreach path."""
+    w, h = image.size
+    channels = image.channels
+    buf = np.empty(w * h * channels, dtype=np.float32)
+    image.pixels.foreach_get(buf)
+    return buf.reshape(h, w, channels)
+
+
+def _save_rgb_png(rgb: np.ndarray, filepath: str) -> bool:
+    """Save an (H, W, 3) float array as PNG through a scratch Blender image."""
+    h, w = rgb.shape[:2]
+    img = bpy.data.images.new("gemini_edit_scratch", width=w, height=h, alpha=True)
+    try:
+        out = np.ones((h, w, 4), dtype=np.float32)
+        out[..., :3] = rgb
+        img.pixels.foreach_set(out.ravel())
+        img.filepath_raw = filepath
+        img.file_format = 'PNG'
+        img.save()
+        return os.path.exists(filepath)
+    except Exception as e:
+        print(f"[GEMINI] Failed to save guide: {e}")
+        return False
+    finally:
+        bpy.data.images.remove(img)
+
+
+def _save_image_to_path(image, filepath: str) -> bool:
+    """Save a Blender image datablock to disk without altering it."""
+    original_filepath = image.filepath_raw
+    original_format = image.file_format
+    try:
+        image.filepath_raw = filepath
+        image.file_format = 'PNG'
+        try:
+            # save() writes raw data (no view transform darkening).
+            image.save()
+        except RuntimeError:
+            image.save_render(filepath)
+        if not os.path.exists(filepath):
+            image.save_render(filepath)
+        return os.path.exists(filepath)
+    except Exception as e:
+        print(f"[GEMINI] Image save failed: {e}")
+        return False
+    finally:
+        image.filepath_raw = original_filepath
+        image.file_format = original_format
+
+
+# ---------------------------------------------------------------------------
+# Panel
+# ---------------------------------------------------------------------------
 
 class BANANA_PT_image_editor_panel(Panel):
-    """Main Image Editor panel for AI post-processing"""
-    bl_label = "Nano Banana Pro Edit"
+    """AI edit panel inside the Image Editor."""
+    bl_label = "AI Edit"
     bl_idname = "BANANA_PT_image_editor_panel"
     bl_space_type = 'IMAGE_EDITOR'
     bl_region_type = 'UI'
-    bl_category = "Nano Banana Pro"
-    
+    bl_category = "Gemini"
+
     @classmethod
     def poll(cls, context):
-        """Only show if there's an image in the editor"""
         sima = context.space_data
         return sima and sima.image is not None
-    
+
     def draw(self, context):
         layout = self.layout
         sima = context.space_data
         image = sima.image
         props = context.window_manager.nano_banana_editor
-        
-        # Image info
+
+        # Image info.
         box = layout.box()
-        box.label(text=f"🖼️ {image.name}", icon='IMAGE_DATA')
-        box.label(text=f"📏 {image.size[0]}x{image.size[1]}", icon='EMPTY_DATA')
-        
-        # Convert Render Result button
+        row = box.row()
+        row.label(text=image.name, icon='IMAGE_DATA')
+        box.label(text=f"{image.size[0]} x {image.size[1]}", icon='TEXTURE')
+
         if image.type == 'RENDER_RESULT':
-            box.separator()
-            box.label(text="⚠️ Render Result is read-only", icon='INFO')
+            box.label(text="Render Result is read-only", icon='INFO')
             row = box.row()
             row.scale_y = 1.2
-            row.operator("nano_banana.convert_render_result", text="Convert to Editable", icon='IMAGE_RGB')
-        
-        # Resolution selection
-        box.label(text="Output Resolution:", icon='FULLSCREEN_ENTER')
-        box.prop(props, "resolution", text="")
-        
-        # Edit prompt
+            row.operator("nano_banana.convert_render_result",
+                         text="Convert to Editable", icon='IMAGE_RGB')
+
+        col = layout.column()
+        col.use_property_split = True
+        col.use_property_decorate = False
+        col.prop(props, "resolution")
+
         layout.separator()
+        layout.label(text="Edit Instructions", icon='TEXT')
+        layout.prop(props, "edit_prompt", text="")
+
+        # Inpainting.
         box = layout.box()
-        box.label(text="Edit Instructions:", icon='TEXT')
-        box.prop(props, "edit_prompt", text="")
-        
-        # Inpainting mode
-        layout.separator()
-        box = layout.box()
-        row = box.row()
-        row.prop(props, "use_inpainting", text="✏️ Inpainting", toggle=True)
-        
+        box.prop(props, "use_inpainting", icon='BRUSH_DATA')
         if props.use_inpainting:
-            sima = context.space_data
-            is_paint_mode = sima and sima.mode == 'PAINT'
-            
-            # Draw button
+            is_paint_mode = sima.mode == 'PAINT'
             row = box.row()
-            row.scale_y = 1.5
-            
+            row.scale_y = 1.4
             if is_paint_mode:
-                row.operator("nano_banana.apply_inpaint", text="✨ Apply Drawing", icon='CHECKMARK')
+                row.operator("nano_banana.apply_inpaint",
+                             text="Apply Drawing", icon='CHECKMARK')
             else:
-                row.operator("nano_banana.switch_to_paint", text="🎨 Draw", icon='BRUSH_DATA')
-            
-            # Brush settings (only active when in paint mode)
-            settings_box = box.box()
-            settings_box.label(text="Brush Settings:")
-            settings_box.enabled = is_paint_mode
-            col = settings_box.column(align=True)
-            col.prop(props, "brush_size")
-            col.prop(props, "brush_color", text="Color")
-        
-        # Reference Image section (add objects/people)
-        layout.separator()
+                row.operator("nano_banana.switch_to_paint",
+                             text="Draw", icon='BRUSH_DATA')
+            settings = box.column(align=True)
+            settings.enabled = is_paint_mode
+            settings.prop(props, "brush_size")
+            settings.prop(props, "brush_color", text="")
+
+        # Reference.
         box = layout.box()
-        row = box.row()
-        row.prop(props, "use_reference_image", text="📷 Reference Image", toggle=True)
-        
+        box.prop(props, "use_reference_image", icon='IMAGE_REFERENCE')
         if props.use_reference_image:
-            # Use prop_search to select from existing images without switching
             row = box.row(align=True)
-            row.prop_search(props, "reference_image", bpy.data, "images", text="", icon='IMAGE_DATA')
-            
-            # Custom load button that doesn't switch Image Editor
-            load_op = row.operator("nano_banana.load_reference_image", text="", icon='FILEBROWSER')
-            
-            # Unlink button
+            row.prop_search(props, "reference_image", bpy.data, "images",
+                            text="", icon='IMAGE_DATA')
+            row.operator("nano_banana.load_reference_image", text="",
+                         icon='FILEBROWSER')
             if props.reference_image:
-                unlink_op = row.operator("nano_banana.unlink_reference_image", text="", icon='X')
-            
-            if props.reference_image:
-                box.label(text=f"✓ {props.reference_image.name}", icon='CHECKMARK')
-                
-                # Show hint - inpainting is optional
-                if props.use_inpainting:
-                    box.label(text="💡 Draw WHERE (optional)", icon='INFO')
-                else:
-                    box.label(text="💡 Describe what/where to add", icon='INFO')
-            else:
-                box.label(text="💡 Click 📂 to load", icon='INFO')
-        
-        # Main action buttons (skip if inpainting - has own button)
-        if not props.use_inpainting:
-            layout.separator()
-            col = layout.column(align=True)
-            col.scale_y = 1.8
-            
-            if props.is_editing:
-                col.enabled = False
-                col.operator("nano_banana.apply_edit", text="🔄 Processing...", icon='TIME')
-            else:
-                if props.edit_prompt.strip() or props.use_reference_image:
-                    col.operator("nano_banana.apply_edit", text="✨ Apply AI Edit", icon='BRUSH_DATA')
-                else:
-                    col.enabled = False
-                    col.operator("nano_banana.apply_edit", text="Enter prompt", icon='INFO')
-        
-        # Render button for inpainting
-        if props.use_inpainting:
-            layout.separator()
-            col = layout.column(align=True)
-            col.scale_y = 1.8
-            
-            if props.is_editing:
-                col.enabled = False
-                col.operator("nano_banana.apply_edit", text="🔄 Processing...", icon='TIME')
-            else:
-                if props.edit_prompt.strip():
-                    col.operator("nano_banana.apply_edit", text="🎬 Render", icon='RENDER_STILL')
-                else:
-                    col.enabled = False
-                    col.operator("nano_banana.apply_edit", text="Enter prompt first", icon='INFO')
-        
-        # Quick actions
+                row.operator("nano_banana.unlink_reference_image", text="",
+                             icon='X')
+                hint = ("Draw where to place it (optional)"
+                        if props.use_inpainting
+                        else "Describe what/where to add")
+                box.label(text=hint, icon='INFO')
+
+        # Primary action.
         layout.separator()
-        box = layout.box()
-        box.label(text="Finalize & Adjust:", icon='IMAGE_RGB')
-        col = box.column(align=True)
-        col.scale_y = 1.3
-        col.operator("nano_banana.finalize_composite", text="Finalize Composite")
-        
-        layout.separator()
+        action = layout.column(align=True)
+        action.scale_y = 1.8
+        if props.is_editing:
+            action.enabled = False
+            action.operator("nano_banana.apply_edit", text="Processing...",
+                            icon='TIME')
+        elif props.edit_prompt.strip() or props.use_reference_image:
+            action.operator("nano_banana.apply_edit", text="Apply AI Edit",
+                            icon='SHADERFX')
+        else:
+            action.enabled = False
+            action.operator("nano_banana.apply_edit", text="Enter a prompt",
+                            icon='INFO')
+
+        # Secondary actions.
+        col = layout.column(align=True)
+        col.operator("nano_banana.finalize_composite",
+                     text="Finalize Composite", icon='NODE_COMPOSITING')
         row = layout.row(align=True)
-        row.scale_y = 1.2
-        row.operator("nano_banana.rerender_image", text="Re-render", icon='FILE_REFRESH')
-        
-        # Status
+        row.operator("nano_banana.rerender_image", text="Re-render",
+                     icon='FILE_REFRESH')
+        row.operator("nano_banana.save_version", text="Save Version",
+                     icon='DUPLICATE')
+
         layout.separator()
-        box = layout.box()
-        box.label(text=props.status_text, icon='INFO')
-        
-        # History
+        layout.label(text=props.status_text, icon='INFO')
+
+        # History.
         if len(props.edit_history) > 0:
-            layout.separator()
-            row = layout.row()
-            row.prop(props, "show_history", 
-                    text=f"History ({len(props.edit_history)} edits)" if not props.show_history else "Hide History",
-                    toggle=True, icon='TIME')
-            
+            layout.prop(props, "show_history",
+                        text=f"History ({len(props.edit_history)})",
+                        toggle=True, icon='TIME')
             if props.show_history:
                 box = layout.box()
                 for i, item in enumerate(reversed(props.edit_history)):
                     actual_index = len(props.edit_history) - 1 - i
-                    
                     row = box.row(align=True)
                     row.scale_y = 0.8
-                    
-                    # Timestamp and prompt preview
                     col = row.column()
-                    col.label(text=f"#{len(props.edit_history) - i} • {item.timestamp}")
-                    prompt_prev = item.prompt[:40] + "..." if len(item.prompt) > 40 else item.prompt
-                    col.label(text=prompt_prev, icon='TEXT')
-                    
-                    # Load button
-                    load_btn = row.operator("nano_banana.load_history_edit", text="", icon='LOOP_BACK')
-                    load_btn.history_index = actual_index
-                    
-                    if i < len(props.edit_history) - 1:
-                        box.separator()
+                    col.label(text=f"#{len(props.edit_history) - i}  {item.timestamp}")
+                    preview = (item.prompt[:40] + "...") if len(item.prompt) > 40 \
+                        else item.prompt
+                    col.label(text=preview, icon='TEXT')
+                    row.operator("nano_banana.load_history_edit", text="",
+                                 icon='LOOP_BACK').history_index = actual_index
 
 
-
+# ---------------------------------------------------------------------------
+# Operators
+# ---------------------------------------------------------------------------
 
 class NANO_BANANA_OT_apply_edit(Operator):
-    """Apply AI edit to the current image"""
+    """Send the current image to the AI with the edit instructions"""
     bl_idname = "nano_banana.apply_edit"
     bl_label = "Apply AI Edit"
     bl_options = {'REGISTER'}
-    
+
     def execute(self, context):
         props = context.window_manager.nano_banana_editor
         sima = context.space_data
         image = sima.image
-        
+
         if not image:
-            self.report({'ERROR'}, "No image in editor")
+            self.report({'ERROR'}, "No image in the editor")
             return {'CANCELLED'}
-        
-        # Validate prompt
         if not props.edit_prompt.strip() and not props.use_reference_image:
-            self.report({'ERROR'}, "Enter edit instructions or select reference image")
+            self.report({'ERROR'}, "Enter edit instructions or pick a reference")
             return {'CANCELLED'}
-        
-        # Validate API key
+
         from . import gemini_api
         api_key = gemini_api.get_api_key()
         if not api_key:
-            self.report({'ERROR'}, "API key not set. Enter it in addon preferences.")
+            self.report({'ERROR'},
+                        "No API key. Set it in the add-on preferences.")
             return {'CANCELLED'}
-        
-        # Start edit in background thread
+
         props.is_editing = True
         props.status_text = "Starting AI edit..."
-        
+
         try:
-            from . import image_edit_thread
-            
-            # Save current image to temp file
-            import tempfile
-            import os
-            
             temp_dir = tempfile.mkdtemp(prefix="nano_banana_edit_")
             image_path = os.path.join(temp_dir, "original.png")
-            
-            # Use image.save() - saves raw image data WITHOUT view transform
-            # This is the CORRECT way to save images in Blender
-            print(f"[NANO BANANA] Saving image with image.save() (no view transform)...")
-            
-            # Store original settings
-            original_filepath = image.filepath_raw
-            original_file_format = image.file_format
-            
-            try:
-                # Set target path and format
-                image.filepath_raw = image_path
-                image.file_format = 'PNG'
-                
-                # CRITICAL: Use save() NOT save_render()
-                # save() = raw image data (correct)
-                # save_render() = applies view transform (wrong - darkens image)
-                try:
-                    image.save()
-                except Exception as e:
-                    print(f"[NANO BANANA] image.save() failed: {e}, trying save_render()...")
-                    image.save_render(image_path)
-                
-                print(f"[NANO BANANA] ✅ Saved: {image_path}")
-                print(f"[NANO BANANA]    Size: {image.size[0]}x{image.size[1]}")
-                print(f"[NANO BANANA]    Channels: {image.channels}")
-                
-                # Verify file was created
-                if os.path.exists(image_path):
-                    file_size = os.path.getsize(image_path)
-                    print(f"[NANO BANANA] ✅ File exists: {file_size} bytes")
-                else:
-                    # Last resort: try save_render if save() didn't throw but also didn't save (Render Result quirk)
-                    print(f"[NANO BANANA] File missing after save(), trying save_render()...")
-                    image.save_render(image_path)
-                    if os.path.exists(image_path):
-                         print(f"[NANO BANANA] ✅ File created with save_render()")
-                    else:
-                         print(f"[NANO BANANA] ❌ ERROR: File not created!")
-                    
-            finally:
-                # Restore original settings
-                image.filepath_raw = original_filepath
-                image.file_format = original_file_format
-            
-            # Get reference image path if provided
+            if not _save_image_to_path(image, image_path):
+                raise RuntimeError("Could not save the current image to disk")
+
             reference_path = None
             if props.use_reference_image and props.reference_image:
                 reference_path = os.path.join(temp_dir, "reference.png")
-                
-                # Save reference using image.save()
-                ref_image = props.reference_image
-                ref_original_filepath = ref_image.filepath_raw
-                ref_original_format = ref_image.file_format
-                
-                try:
-                    ref_image.filepath_raw = reference_path
-                    ref_image.file_format = 'PNG'
-                    ref_image.save()
-                    print(f"[NANO BANANA] ✅ Saved reference image: {reference_path}")
-                finally:
-                    ref_image.filepath_raw = ref_original_filepath
-                    ref_image.file_format = ref_original_format
-            
-            # Get inpainting guide if enabled
+                if not _save_image_to_path(props.reference_image, reference_path):
+                    reference_path = None
+
             inpaint_guide_path = None
             if props.use_inpainting:
-                # Extract user's drawing as guide for AI
                 inpaint_guide_path = self._extract_inpaint_guide(image, temp_dir)
                 if not inpaint_guide_path:
                     props.is_editing = False
-                    self.report({'WARNING'}, "No drawing found. Click Draw and paint something!")
+                    self.report({'WARNING'},
+                                "No drawing found. Click Draw and paint the area.")
                     return {'CANCELLED'}
-                print(f"[NANO BANANA] Extracted inpaint guide: {inpaint_guide_path}")
-            
-            # Start background thread
+
+            from . import image_edit_thread
             thread = image_edit_thread.ImageEditThread(
                 image_path=image_path,
                 edit_prompt=props.edit_prompt,
                 mask_path=inpaint_guide_path,
                 reference_path=reference_path,
                 api_key=api_key,
-                context=context,
                 original_image_name=image.name,
                 temp_dir=temp_dir,
-                resolution=props.resolution, # Pass selected resolution
-                original_size=(image.size[0], image.size[1]) # Pass original size for auto-detect
+                resolution=props.resolution,
+                original_size=(image.size[0], image.size[1]),
             )
-            
             thread.start()
-            print("[NANO BANANA] Edit thread started in background")
-            
-            self.report({'INFO'}, "AI edit started in background...")
-            
+            self.report({'INFO'}, "AI edit started in the background")
+            return {'FINISHED'}
+
         except Exception as e:
             props.is_editing = False
-            props.status_text = f"Error: {str(e)}"
-            self.report({'ERROR'}, f"Failed to start edit: {str(e)}")
+            props.status_text = f"Error: {e}"
+            self.report({'ERROR'}, f"Failed to start edit: {e}")
             return {'CANCELLED'}
-        
-        return {'FINISHED'}
-    
-    def _extract_inpaint_guide(self, image: bpy.types.Image, temp_dir: str) -> Optional[str]:
-        """Extract user's drawing (inpainting guide) for AI to understand what to create"""
+
+    def _extract_inpaint_guide(self, image, temp_dir):
+        """Save the user's painted guide (any non-black strokes) as a PNG."""
         try:
-            print(f"[NANO BANANA] Extracting inpaint guide from: {image.name}")
-            
-            width, height = image.size
-            
-            # Force update pixels
             image.update()
-            
-            # Try PIL method first (better)
-            try:
-                from PIL import Image as PILImage
-                import numpy as np
-                
-                print("[NANO BANANA] Using PIL for inpaint extraction")
-                
-                pixels = list(image.pixels[:])
-                
-                if image.channels >= 3:
-                    pixel_array = np.array(pixels).reshape((height, width, image.channels))
-                    rgb = pixel_array[:, :, :3]
-                    
-                    # Detect painted areas (any non-black color)
-                    has_paint = np.any(rgb > 0.05, axis=2)
-                    painted_pixels = int(np.sum(has_paint))
-                    
-                    print(f"[NANO BANANA] Painted pixels: {painted_pixels}")
-                    
-                    if painted_pixels < 50:
-                        print("[NANO BANANA] Not enough drawing - draw more!")
-                        return None
-                    
-                    # Save colored guide
-                    guide_path = os.path.join(temp_dir, "inpaint_guide.png")
-                    rgb_uint8 = (rgb * 255).astype(np.uint8)
-                    rgb_uint8 = np.flipud(rgb_uint8)
-                    
-                    pil_guide = PILImage.fromarray(rgb_uint8, mode='RGB')
-                    pil_guide.save(guide_path)
-                    
-                    print(f"[NANO BANANA] Inpaint guide saved: {guide_path}")
-                    return guide_path
-                else:
-                    print(f"[NANO BANANA] Image needs RGB channels")
-                    return None
-                    
-            except ImportError as e:
-                print(f"[NANO BANANA] PIL not available: {e}")
-                print("[NANO BANANA] Using Blender native save method...")
-                
-                # Fallback: use Blender's native save
-                guide_path = os.path.join(temp_dir, "inpaint_guide.png")
-                
-                # Save image directly using Blender
-                original_path = image.filepath_raw
-                original_format = image.file_format
-                
-                try:
-                    image.filepath_raw = guide_path
-                    image.file_format = 'PNG'
-                    image.save()
-                    
-                    print(f"[NANO BANANA] Inpaint guide saved (Blender method): {guide_path}")
-                    
-                    # Check if file exists
-                    if os.path.exists(guide_path):
-                        file_size = os.path.getsize(guide_path)
-                        print(f"[NANO BANANA] File saved successfully: {file_size} bytes")
-                        return guide_path
-                    else:
-                        print(f"[NANO BANANA] File not created!")
-                        return None
-                        
-                finally:
-                    # Restore original settings
-                    image.filepath_raw = original_path
-                    image.file_format = original_format
-                
+            pixels = _read_pixels(image)
+            if pixels.shape[2] < 3:
+                return None
+            rgb = pixels[..., :3]
+            painted = int((rgb > 0.05).any(axis=2).sum())
+            if painted < 50:
+                return None
+            guide_path = os.path.join(temp_dir, "inpaint_guide.png")
+            if _save_rgb_png(rgb, guide_path):
+                return guide_path
+            return None
         except Exception as e:
-            print(f"[NANO BANANA] Error: {e}")
+            print(f"[GEMINI] Guide extraction failed: {e}")
             import traceback
             traceback.print_exc()
             return None
 
 
 class NANO_BANANA_OT_finalize_composite(Operator):
-    """Finalize composite - unify colors, contrast, lighting across entire image"""
+    """Unify colors, contrast and lighting across the whole image"""
     bl_idname = "nano_banana.finalize_composite"
     bl_label = "Finalize Composite"
-    bl_description = "Unify colors, contrast, and lighting to create seamless photorealistic result"
     bl_options = {'REGISTER'}
-    
+
     def execute(self, context):
-        wm = context.window_manager
-        props = wm.nano_banana_editor
-        
-        if not context.space_data or context.space_data.type != 'IMAGE_EDITOR':
-            self.report({'ERROR'}, "Must be in Image Editor")
-            return {'CANCELLED'}
-        
-        current_image = context.space_data.image
-        if not current_image:
+        props = context.window_manager.nano_banana_editor
+        sima = context.space_data
+        if not sima or sima.type != 'IMAGE_EDITOR' or not sima.image:
             self.report({'ERROR'}, "No image to finalize")
             return {'CANCELLED'}
-        
-        # Set special finalization prompt
         props.edit_prompt = "[FINALIZE_COMPOSITE]"
-        
-        # Call apply edit with special mode
         bpy.ops.nano_banana.apply_edit()
-        
-        self.report({'INFO'}, "Finalizing composite - unifying colors, contrast, lighting...")
+        self.report({'INFO'}, "Finalizing composite...")
         return {'FINISHED'}
 
 
 class NANO_BANANA_OT_rerender_image(Operator):
-    """Re-render the image with the same settings (variation)"""
+    """Generate a new variation using the previous edit settings"""
     bl_idname = "nano_banana.rerender_image"
     bl_label = "Re-render Image"
-    bl_description = "Generate a new variation with the same prompt and settings"
     bl_options = {'REGISTER'}
-    
+
     def execute(self, context):
         props = context.window_manager.nano_banana_editor
-        sima = context.space_data
-        image = sima.image
-        
-        if not image:
-            self.report({'ERROR'}, "No image in editor")
+        if not context.space_data or not context.space_data.image:
+            self.report({'ERROR'}, "No image in the editor")
             return {'CANCELLED'}
-        
-        # Check if we have history to pull from
         if len(props.edit_history) == 0:
-            self.report({'INFO'}, "No edit history - use 'Apply AI Edit' first")
+            self.report({'INFO'}, "No edit history yet — use Apply AI Edit first")
             return {'CANCELLED'}
-        
-        # Get last edit from history
-        last_edit = props.edit_history[-1]
-        
-        # Reload prompt from last edit
-        props.edit_prompt = last_edit.prompt
-        
-        # Trigger edit operator
+        props.edit_prompt = props.edit_history[-1].prompt
         bpy.ops.nano_banana.apply_edit()
-        
         self.report({'INFO'}, "Re-rendering with previous settings...")
         return {'FINISHED'}
 
 
 class NANO_BANANA_OT_save_version(Operator):
-    """Save current image as a new version"""
+    """Save the current image as a new version"""
     bl_idname = "nano_banana.save_version"
     bl_label = "Save Version"
     bl_options = {'REGISTER'}
-    
+
     def execute(self, context):
         sima = context.space_data
-        image = sima.image
-        
-        if not image:
-            self.report({'ERROR'}, "No image in editor")
+        if not sima or not sima.image:
+            self.report({'ERROR'}, "No image in the editor")
             return {'CANCELLED'}
-        
-        try:
-            # Create a copy of the image
-            new_image = image.copy()
-            new_image.name = f"{image.name}_v{len(context.window_manager.nano_banana_editor.edit_history) + 1}"
-            
-            self.report({'INFO'}, f"Saved as {new_image.name}")
-            return {'FINISHED'}
-            
-        except Exception as e:
-            self.report({'ERROR'}, f"Failed to save version: {str(e)}")
-            return {'CANCELLED'}
+        props = context.window_manager.nano_banana_editor
+        new_image = sima.image.copy()
+        new_image.name = f"{sima.image.name}_v{len(props.edit_history) + 1}"
+        self.report({'INFO'}, f"Saved as {new_image.name}")
+        return {'FINISHED'}
 
 
 class NANO_BANANA_OT_load_history_edit(Operator):
-    """Load edit from history"""
+    """Load a previous edit"""
     bl_idname = "nano_banana.load_history_edit"
     bl_label = "Load History Edit"
     bl_options = {'REGISTER'}
-    
+
     history_index: IntProperty()
-    
+
     def execute(self, context):
         props = context.window_manager.nano_banana_editor
-        
-        if self.history_index < 0 or self.history_index >= len(props.edit_history):
+        if not (0 <= self.history_index < len(props.edit_history)):
             self.report({'ERROR'}, "Invalid history index")
             return {'CANCELLED'}
-        
         item = props.edit_history[self.history_index]
-        
-        # Load prompt
         props.edit_prompt = item.prompt
-        
-        # Load image if available
         if item.image_name in bpy.data.images:
             context.space_data.image = bpy.data.images[item.image_name]
             self.report({'INFO'}, f"Loaded edit from {item.timestamp}")
         else:
             self.report({'WARNING'}, f"Image {item.image_name} not found")
-        
         return {'FINISHED'}
 
 
 class NANO_BANANA_OT_convert_render_result(Operator):
-    """Convert Render Result to editable image with correct colors"""
+    """Convert the read-only Render Result into an editable image"""
     bl_idname = "nano_banana.convert_render_result"
     bl_label = "Convert Render Result"
     bl_options = {'REGISTER'}
-    
+
     def execute(self, context):
+        import time
         sima = context.space_data
         if not sima or not sima.image:
             return {'CANCELLED'}
-            
         image = sima.image
         if image.type != 'RENDER_RESULT':
             self.report({'INFO'}, "Image is already editable")
             return {'FINISHED'}
-            
+
         try:
-            # Create temp file
-            import tempfile
-            import os
-            temp_path = os.path.join(tempfile.gettempdir(), f"render_convert_{int(time.time())}.png")
-            
-            # Save using current scene color management settings
-            # This "bakes" the view transform into the pixels, which is what we see on screen
-            # This is usually what users want when editing "what they see"
+            temp_path = os.path.join(tempfile.gettempdir(),
+                                     f"render_convert_{int(time.time())}.png")
             scene = context.scene
-            
-            # Store current settings
-            old_settings = scene.render.image_settings
-            old_format = old_settings.file_format
-            old_mode = old_settings.color_mode
-            old_depth = old_settings.color_depth
-            
-            # Force standard PNG settings
-            old_settings.file_format = 'PNG'
-            old_settings.color_mode = 'RGBA'
-            old_settings.color_depth = '8'
-            
+            settings = scene.render.image_settings
+            saved = (settings.file_format, settings.color_mode,
+                     settings.color_depth)
+            settings.file_format = 'PNG'
+            settings.color_mode = 'RGBA'
+            settings.color_depth = '8'
             try:
+                # Bakes the view transform in — matches what the user sees.
                 image.save_render(temp_path, scene=scene)
             finally:
-                # Restore settings
-                old_settings.file_format = old_format
-                old_settings.color_mode = old_mode
-                old_settings.color_depth = old_depth
-            
-            # Create new image
-            new_image_name = f"Editable_Render_{len(bpy.data.images)}"
+                (settings.file_format, settings.color_mode,
+                 settings.color_depth) = saved
+
             new_image = bpy.data.images.load(temp_path)
-            new_image.name = new_image_name
+            new_image.name = f"Editable_Render_{len(bpy.data.images)}"
             new_image.filepath_raw = temp_path
-            
-            # Switch editor to new image
             sima.image = new_image
-            
             self.report({'INFO'}, f"Converted to {new_image.name}")
             return {'FINISHED'}
-            
         except Exception as e:
-            self.report({'ERROR'}, f"Conversion failed: {str(e)}")
+            self.report({'ERROR'}, f"Conversion failed: {e}")
             return {'CANCELLED'}
 
 
 class NANO_BANANA_OT_switch_to_paint(Operator):
-    """Switch Image Editor to Paint mode"""
+    """Switch the Image Editor into Paint mode with the guide brush"""
     bl_idname = "nano_banana.switch_to_paint"
-    bl_label = "Start Paint"
+    bl_label = "Start Painting"
     bl_options = {'REGISTER'}
-    
+
     def execute(self, context):
         props = context.window_manager.nano_banana_editor
         sima = context.space_data
-        
         if not sima or not sima.image:
-            self.report({'ERROR'}, "No image in editor")
+            self.report({'ERROR'}, "No image in the editor")
             return {'CANCELLED'}
-        
-        image = sima.image
-        
-        # Check if image is Render Result - cannot paint on it directly
-        if image.type == 'RENDER_RESULT':
-            self.report({'INFO'}, "Converting Render Result to editable image...")
-            # Call our robust conversion operator
+
+        if sima.image.type == 'RENDER_RESULT':
+            image_before = sima.image
             bpy.ops.nano_banana.convert_render_result()
-            # Update reference to new image
-            if sima.image != image:
-                image = sima.image
-            else:
-                # Conversion failed or cancelled
+            if sima.image == image_before:
                 return {'CANCELLED'}
-        
+
         try:
-            # Switch to Paint mode
             sima.mode = 'PAINT'
-            
-            # Setup brush
             ts = context.tool_settings
-            if ts.image_paint:
-                if not ts.image_paint.brush:
-                    if 'Draw' in bpy.data.brushes:
-                        ts.image_paint.brush = bpy.data.brushes['Draw']
-                
-                if ts.image_paint.brush:
-                    ts.image_paint.brush.size = props.brush_size
-                    ts.image_paint.brush.color = props.brush_color
-                    ts.image_paint.brush.strength = 1.0
-                    
+            paint = getattr(ts, 'image_paint', None)
+            if paint:
+                if not paint.brush and 'Draw' in bpy.data.brushes:
+                    paint.brush = bpy.data.brushes['Draw']
+                if paint.brush:
+                    paint.brush.size = props.brush_size
+                    paint.brush.color = props.brush_color
+                    paint.brush.strength = 1.0
                     if hasattr(ts, 'unified_paint_settings'):
                         ts.unified_paint_settings.size = props.brush_size
                         ts.unified_paint_settings.color = props.brush_color
-            
-            self.report({'INFO'}, "Draw mode")
+            self.report({'INFO'}, "Paint mode: draw your guide")
             return {'FINISHED'}
-            
         except Exception as e:
-            self.report({'ERROR'}, f"Failed: {str(e)}")
+            self.report({'ERROR'}, f"Failed: {e}")
             return {'CANCELLED'}
 
 
 class NANO_BANANA_OT_apply_inpaint(Operator):
-    """Apply inpainting - save drawing as new image"""
+    """Keep the drawing on a working copy and back up the original"""
     bl_idname = "nano_banana.apply_inpaint"
     bl_label = "Apply Drawing"
     bl_options = {'REGISTER'}
-    
+
     def execute(self, context):
         sima = context.space_data
-        
         if not sima or not sima.image:
             return {'CANCELLED'}
-        
+
         try:
+            from . import threading_utils
             current_image = sima.image
             props = context.window_manager.nano_banana_editor
-            
-            # Update pixels to ensure latest changes
             current_image.update()
-            
-            # Save current image to history BEFORE creating copy
-            from datetime import datetime
-            
-            # Create a backup copy for history
+
+            # Back up the painted state for the history.
             history_image = current_image.copy()
-            history_image.name = f"{current_image.name}_history_{len(props.edit_history)}"
-            
+            history_image.name = (f"{current_image.name}_history_"
+                                  f"{len(props.edit_history)}")
             try:
-                from . import threading_utils
-                threading_utils.save_blender_image(history_image, history_image.name)
+                threading_utils.save_blender_image(history_image,
+                                                   history_image.name)
             except Exception as e:
-                print(f"[NANO BANANA] Warning: Could not save history image: {e}")
-                pass
-            
-            history_item = props.edit_history.add()
-            history_item.prompt = "[Inpaint sketch applied]"
-            history_item.image_name = history_image.name # Point to the BACKUP copy
-            history_item.timestamp = datetime.now().strftime("%H:%M:%S")
-            history_item.has_mask = True
-            
-            print(f"[NANO BANANA] Saved history backup: {history_image.name}")
-            
-            # Create duplicate with drawing
+                print(f"[GEMINI] History image save warning: {e}")
+
+            item = props.edit_history.add()
+            item.prompt = "[Inpaint sketch applied]"
+            item.image_name = history_image.name
+            item.timestamp = datetime.now().strftime("%H:%M:%S")
+            item.has_mask = True
+
+            # Working copy carries the drawing forward.
             new_image = current_image.copy()
             new_image.name = f"{current_image.name}_inpaint"
-            
-            # Copy pixel data
-            new_image.pixels = list(current_image.pixels[:])
+            pixels = _read_pixels(current_image)
+            new_image.pixels.foreach_set(pixels.ravel())
             new_image.update()
-            
             try:
-                from . import threading_utils
-                saved_path = threading_utils.save_blender_image(new_image, new_image.name)
-                print(f"[NANO BANANA] Saved inpaint copy: {saved_path}")
-            except Exception as save_error:
-                print(f"[NANO BANANA] Save failed (not critical): {save_error}")
-            
-            # Switch to duplicate
+                threading_utils.save_blender_image(new_image, new_image.name)
+            except Exception as e:
+                print(f"[GEMINI] Inpaint copy save warning: {e}")
+
             sima.image = new_image
-            
-            # Switch to view mode
             sima.mode = 'VIEW'
-            
-            print(f"[NANO BANANA] Created inpaint copy: {new_image.name}")
-            self.report({'INFO'}, f"Original saved to history! Drawing saved as {new_image.name}")
-            
+            self.report({'INFO'},
+                        f"Original backed up; drawing saved as {new_image.name}")
             return {'FINISHED'}
-            
         except Exception as e:
             import traceback
-            print(f"[NANO BANANA] Error creating inpaint copy: {e}")
             traceback.print_exc()
-            self.report({'ERROR'}, f"Failed: {str(e)}")
+            self.report({'ERROR'}, f"Failed: {e}")
             return {'CANCELLED'}
-
-
-def on_mask_toggle(self, context):
-    """Handle mask toggle - switch to Paint mode automatically"""
-    try:
-        # Find Image Editor area
-        for area in context.screen.areas:
-            if area.type == 'IMAGE_EDITOR':
-                for space in area.spaces:
-                    if space.type == 'IMAGE_EDITOR':
-                        if not space.image:
-                            return
-                        
-                        if self.use_mask:
-                            # Switch to Paint mode
-                            with context.temp_override(area=area, space_data=space):
-                                space.mode = 'PAINT'
-                                print("[NANO BANANA] Switched to Paint mode")
-                                
-                                # Setup brush in Tool Settings
-                                try:
-                                    ts = context.tool_settings
-                                    paint = ts.image_paint
-                                    
-                                    if paint:
-                                        brush = paint.brush
-                                        if not brush:
-                                            # Create default brush
-                                            if 'Draw' in bpy.data.brushes:
-                                                brush = bpy.data.brushes['Draw']
-                                                paint.brush = brush
-                                            else:
-                                                print("[NANO BANANA] No default brush found")
-                                        
-                                        if brush:
-                                            # Set brush properties in Tool Settings
-                                            brush.size = self.brush_size
-                                            brush.color = self.brush_color
-                                            brush.strength = 1.0
-                                            brush.blend = 'MIX'
-                                            
-                                            # Also update unified settings
-                                            if hasattr(ts, 'unified_paint_settings'):
-                                                ups = ts.unified_paint_settings
-                                                ups.size = self.brush_size
-                                                ups.color = self.brush_color
-                                                ups.use_unified_size = True
-                                                ups.use_unified_color = True
-                                            
-                                            print(f"[NANO BANANA] Brush configured in Tool Settings: size={brush.size}, color={brush.color[:]}")
-                                except Exception as e:
-                                    import traceback
-                                    print(f"[NANO BANANA] Brush setup error: {e}")
-                                    traceback.print_exc()
-                        else:
-                            # Switch to View mode
-                            with context.temp_override(area=area, space_data=space):
-                                space.mode = 'VIEW'
-                                print("[NANO BANANA] Switched to View mode")
-                        
-                        area.tag_redraw()
-                        break
-                        
-    except Exception as e:
-        import traceback
-        print(f"[NANO BANANA] Mask toggle error: {e}")
-        traceback.print_exc()
 
 
 class NANO_BANANA_OT_load_reference_image(Operator):
-    """Load reference image from file without switching Image Editor"""
+    """Load a reference image without switching the editor view"""
     bl_idname = "nano_banana.load_reference_image"
     bl_label = "Load Reference Image"
     bl_options = {'REGISTER'}
-    
-    filepath: bpy.props.StringProperty(subtype="FILE_PATH")
-    filter_image: bpy.props.BoolProperty(default=True, options={'HIDDEN'})
-    
+
+    filepath: StringProperty(subtype="FILE_PATH")
+    filter_image: BoolProperty(default=True, options={'HIDDEN'})
+
     def invoke(self, context, event):
         context.window_manager.fileselect_add(self)
         return {'RUNNING_MODAL'}
-    
+
     def execute(self, context):
-        try:
-            props = context.window_manager.nano_banana_editor
-            
-            # Load image without switching Image Editor
-            if self.filepath:
-                # Check if already loaded
-                image_name = os.path.basename(self.filepath)
-                if image_name in bpy.data.images:
-                    loaded_image = bpy.data.images[image_name]
-                    print(f"[NANO BANANA] Using existing image: {image_name}")
-                else:
-                    # Load new image
-                    loaded_image = bpy.data.images.load(self.filepath, check_existing=False)
-                    print(f"[NANO BANANA] Loaded new reference: {loaded_image.name}")
-                
-                # Set as reference WITHOUT switching Image Editor
-                props.reference_image = loaded_image
-                
-                self.report({'INFO'}, f"Loaded: {loaded_image.name}")
-                return {'FINISHED'}
-            else:
-                self.report({'WARNING'}, "No file selected")
-                return {'CANCELLED'}
-                
-        except Exception as e:
-            self.report({'ERROR'}, f"Failed to load: {str(e)}")
-            print(f"[NANO BANANA] Error loading reference: {e}")
+        props = context.window_manager.nano_banana_editor
+        if not self.filepath:
+            self.report({'WARNING'}, "No file selected")
             return {'CANCELLED'}
+        try:
+            image = bpy.data.images.load(self.filepath, check_existing=True)
+        except RuntimeError as e:
+            self.report({'ERROR'}, f"Failed to load: {e}")
+            return {'CANCELLED'}
+        props.reference_image = image
+        self.report({'INFO'}, f"Loaded: {image.name}")
+        return {'FINISHED'}
 
 
 class NANO_BANANA_OT_unlink_reference_image(Operator):
-    """Remove reference image"""
+    """Remove the reference image"""
     bl_idname = "nano_banana.unlink_reference_image"
     bl_label = "Remove Reference"
     bl_options = {'REGISTER'}
-    
+
     def execute(self, context):
-        props = context.window_manager.nano_banana_editor
-        props.reference_image = None
+        context.window_manager.nano_banana_editor.reference_image = None
         self.report({'INFO'}, "Reference removed")
         return {'FINISHED'}
 
 
-def update_brush_settings(self, context):
-    """Update brush settings when UI changes - apply to Tool Settings"""
-    try:
-        # Update in Tool Settings (left side panel in Paint mode)
-        ts = context.tool_settings
-        
-        if hasattr(ts, 'image_paint') and ts.image_paint:
-            paint = ts.image_paint
-            
-            # Update brush
-            if paint.brush:
-                paint.brush.size = self.brush_size
-                paint.brush.color = self.brush_color
-                
-                # Also set unified settings
-                if hasattr(ts, 'unified_paint_settings'):
-                    ups = ts.unified_paint_settings
-                    ups.size = self.brush_size
-                    ups.color = self.brush_color
-                
-                print(f"[NANO BANANA] Brush updated in Tool Settings: size={self.brush_size}, color={self.brush_color[:]}")
-        
-    except Exception as e:
-        import traceback
-        print(f"[NANO BANANA] Brush update error: {e}")
-        traceback.print_exc()
+# ---------------------------------------------------------------------------
+# Registration
+# ---------------------------------------------------------------------------
 
-
-# Registration classes
 classes = (
     EditHistoryItem,
     ImageEditorProperties,
@@ -1041,18 +654,16 @@ classes = (
     NANO_BANANA_OT_load_history_edit,
 )
 
+
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
-    
-    # Add properties to WindowManager (session persistence)
-    bpy.types.WindowManager.nano_banana_editor = PointerProperty(type=ImageEditorProperties)
+    bpy.types.WindowManager.nano_banana_editor = PointerProperty(
+        type=ImageEditorProperties)
+
 
 def unregister():
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
-    
-    # Remove properties
     if hasattr(bpy.types.WindowManager, 'nano_banana_editor'):
         del bpy.types.WindowManager.nano_banana_editor
-
