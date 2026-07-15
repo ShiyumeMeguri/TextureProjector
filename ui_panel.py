@@ -167,14 +167,6 @@ class BANANA_PT_render_panel(Panel):
         layout = self.layout
         props = context.scene.gemini_render
 
-        # Busy state: status + stop.
-        if props.is_rendering:
-            box = layout.box()
-            box.label(text=props.status_text, icon='TIME')
-            row = box.row()
-            row.scale_y = 1.4
-            row.operator("gemini.stop_render", text="Stop", icon='CANCEL')
-
         # API key onboarding (only blocks the AI source).
         needs_key = props.projection_source == 'AI' and not gemini_api.get_api_key()
         if needs_key:
@@ -221,14 +213,13 @@ class BANANA_PT_render_panel(Panel):
                         icon='MOD_UVPROJECT')
 
         # Contextual hint (one-click semantics).
-        obj = context.active_object
-        if not obj or obj.type != 'MESH':
-            layout.label(text="Select a mesh object", icon='ERROR')
-        elif context.mode == 'EDIT_MESH':
+        if context.mode == 'EDIT_MESH':
             layout.label(text="Projecting selected faces", icon='FACESEL')
-        else:
+        elif any(o.type == 'MESH' for o in context.selected_objects):
             layout.label(text="Projecting all faces (Edit Mode to limit)",
                          icon='OBJECT_DATA')
+        else:
+            layout.label(text="Select a mesh object", icon='ERROR')
 
         if not props.is_rendering and props.status_text not in {"", "Ready"}:
             layout.label(text=props.status_text, icon='INFO')

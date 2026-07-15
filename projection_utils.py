@@ -847,20 +847,24 @@ def perform_projection_bake(context, obj, texture_node_name, target_image,
 # ---------------------------------------------------------------------------
 
 def gather_projection_targets(context):
-    """Collect target meshes and per-face masks.
+    """Collect target meshes.
 
     One-click semantics:
-      - Object Mode: all faces of every selected mesh are targeted.
-      - Edit Mode: only the selected faces are targeted (mesh data must be
-        synced to OBJECT mode by the caller before reading selection).
-    Returns (targets, face_masks, was_edit_mode).
+      - Object Mode: all faces of every SELECTED mesh are targeted. An
+        active-but-unselected mesh is deliberately NOT a fallback — the
+        user thinks nothing is selected, and silently kicking off a full
+        capture render reads as a UI hang.
+      - Edit Mode: the meshes being edited; only their selected faces are
+        targeted (mesh data must be synced to OBJECT mode by the caller
+        before reading the selection).
+    Returns (targets, was_edit_mode).
     """
     was_edit = (context.mode == 'EDIT_MESH')
-    targets = [o for o in context.selected_objects
-               if o.type == 'MESH' and '_MaskTemp' not in o.name]
-    if not targets and context.active_object \
-            and context.active_object.type == 'MESH':
-        targets = [context.active_object]
+    if was_edit:
+        targets = [o for o in context.objects_in_mode if o.type == 'MESH']
+    else:
+        targets = [o for o in context.selected_objects
+                   if o.type == 'MESH' and '_MaskTemp' not in o.name]
     return targets, was_edit
 
 

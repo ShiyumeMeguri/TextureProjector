@@ -282,8 +282,25 @@ class BANANA_PT_image_editor_panel(Panel):
 # Operators
 # ---------------------------------------------------------------------------
 
+def _resolve_edit_resolution(resolution: str, original_size) -> tuple:
+    """Map the resolution option to target dimensions (AUTO keeps the tier)."""
+    if resolution in {'1024', '2048', '4096'}:
+        size = int(resolution)
+        return size, size
+    max_dim = max(original_size[0], original_size[1], 1)
+    if max_dim > 2048:
+        return 4096, 4096
+    if max_dim > 1024:
+        return 2048, 2048
+    return 1024, 1024
+
+
 class NANO_BANANA_OT_apply_edit(Operator):
-    """Send the current image to the AI with the edit instructions"""
+    """Send the current image to the AI with the edit instructions.
+
+    Fully synchronous by design (see gemini.texture_projection): the UI
+    blocks while the API call runs, and nothing can deadlock.
+    """
     bl_idname = "nano_banana.apply_edit"
     bl_label = "Apply AI Edit"
     bl_options = {'REGISTER'}
@@ -301,6 +318,7 @@ class NANO_BANANA_OT_apply_edit(Operator):
             return {'CANCELLED'}
 
         from . import gemini_api
+        from . import threading_utils
         api_key = gemini_api.get_api_key()
         if not api_key:
             self.report({'ERROR'},
@@ -308,7 +326,9 @@ class NANO_BANANA_OT_apply_edit(Operator):
             return {'CANCELLED'}
 
         props.is_editing = True
-        props.status_text = "Starting AI edit..."
+        props.status_text = "Editing..."
+        temp_dir = None
+        original_image_name = image.name
 
         try:
             temp_dir = tempfile.mkdtemp(prefix="nano_banana_edit_")
@@ -326,32 +346,68 @@ class NANO_BANANA_OT_apply_edit(Operator):
             if props.use_inpainting:
                 inpaint_guide_path = self._extract_inpaint_guide(image, temp_dir)
                 if not inpaint_guide_path:
-                    props.is_editing = False
                     self.report({'WARNING'},
                                 "No drawing found. Click Draw and paint the area.")
                     return {'CANCELLED'}
 
-            from . import image_edit_thread
-            thread = image_edit_thread.ImageEditThread(
+            width, height = _resolve_edit_resolution(
+                props.resolution, (image.size[0], image.size[1]))
+
+            api_client = gemini_api.GeminiAPI(api_key)
+            image_data, mime = api_client.edit_image(
                 image_path=image_path,
                 edit_prompt=props.edit_prompt,
                 mask_path=inpaint_guide_path,
-                reference_path=reference_path,
-                api_key=api_key,
-                original_image_name=image.name,
-                temp_dir=temp_dir,
-                resolution=props.resolution,
-                original_size=(image.size[0], image.size[1]),
+                reference_image_path=reference_path,
+                width=width,
+                height=height,
             )
-            thread.start()
-            self.report({'INFO'}, "AI edit started in the background")
+            print(f"[GEMINI] Edit complete: {len(image_data)} bytes ({mime})")
+
+            # Load the result and show it in every open Image Editor.
+            result_path = threading_utils.build_output_filepath(
+                f"{original_image_name}_edit")
+            with open(result_path, 'wb') as f:
+                f.write(image_data)
+
+            timestamp = datetime.now().strftime("%H%M%S")
+            new_image = bpy.data.images.load(result_path, check_existing=False)
+            new_image.name = f"{original_image_name}_edit_{timestamp}"
+            new_image.filepath_raw = result_path
+            if hasattr(new_image, 'colorspace_settings'):
+                new_image.colorspace_settings.name = 'sRGB'
+
+            for window in context.window_manager.windows:
+                for area in window.screen.areas:
+                    if area.type == 'IMAGE_EDITOR':
+                        for space in area.spaces:
+                            if space.type == 'IMAGE_EDITOR':
+                                space.image = new_image
+                                space.mode = 'VIEW'
+                        area.tag_redraw()
+
+            item = props.edit_history.add()
+            item.prompt = props.edit_prompt
+            item.image_name = original_image_name
+            item.timestamp = datetime.now().strftime("%H:%M:%S")
+            item.has_mask = bool(inpaint_guide_path)
+
+            props.status_text = "Edit complete"
+            self.report({'INFO'}, f"Edit finished: {new_image.name}")
             return {'FINISHED'}
 
         except Exception as e:
-            props.is_editing = False
             props.status_text = f"Error: {e}"
-            self.report({'ERROR'}, f"Failed to start edit: {e}")
+            self.report({'ERROR'}, str(e))
+            import traceback
+            traceback.print_exc()
             return {'CANCELLED'}
+        finally:
+            props.is_editing = False
+            if temp_dir and os.path.exists(temp_dir) \
+                    and os.path.basename(temp_dir).startswith("nano_banana_edit_"):
+                import shutil
+                shutil.rmtree(temp_dir, ignore_errors=True)
 
     def _extract_inpaint_guide(self, image, temp_dir):
         """Save the user's painted guide (any non-black strokes) as a PNG."""

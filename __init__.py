@@ -16,7 +16,7 @@ if "bpy" in locals():
     import importlib
     for _mod_name in ("gemini_api", "depth_utils", "projection_utils",
                       "threading_utils", "history_previews", "operators",
-                      "ui_panel", "image_editor", "image_edit_thread"):
+                      "ui_panel", "image_editor"):
         if _mod_name in locals():
             importlib.reload(locals()[_mod_name])
 
@@ -33,7 +33,6 @@ from . import history_previews
 from . import operators
 from . import ui_panel
 from . import image_editor
-from . import image_edit_thread
 
 
 class NanoBananaPreferences(AddonPreferences):
@@ -98,7 +97,6 @@ classes = (
     ui_panel.GeminiRenderProperties,
     # Operators.
     operators.GEMINI_OT_texture_projection,
-    operators.GEMINI_OT_stop_render,
     operators.GEMINI_OT_reset_state,
     operators.GEMINI_OT_open_console,
     operators.GEMINI_OT_open_api_key_url,
@@ -126,13 +124,7 @@ classes = (
 
 @persistent
 def _reset_runtime_state(dummy1=None, dummy2=None):
-    """Reset addon runtime state whenever a .blend file is loaded.
-
-    Fixes the historical 'projection bakes black after switching files'
-    lifecycle bug: stale threads/timers from the previous file are dropped.
-    """
-    threading_utils.reset_threading_state()
-    operators.GEMINI_OT_texture_projection.current_thread = None
+    """Reset addon UI flags whenever a .blend file is loaded."""
     for scene in bpy.data.scenes:
         props = getattr(scene, 'gemini_render', None)
         if props is not None:
@@ -163,12 +155,6 @@ def unregister():
     from bpy.app.handlers import load_post
     if _reset_runtime_state in load_post:
         load_post.remove(_reset_runtime_state)
-
-    try:
-        threading_utils.stop_all_projection_threads()
-        threading_utils.stop_thread_manager()
-    except Exception as e:
-        print(f"[GEMINI] Thread shutdown warning: {e}")
 
     history_previews.clear_previews()
 

@@ -116,87 +116,37 @@ def _restore_render_state(scene, saved):
     scene.render.image_settings.file_format = saved['format']
 
 
-def _cleanup_registry(registry, debug_mode=False):
-    """Synchronous cleanup for failures before the worker thread starts."""
-    import shutil
-    try:
-        if bpy.context.object and bpy.context.object.mode != 'OBJECT':
-            bpy.ops.object.mode_set(mode='OBJECT')
-    except RuntimeError:
-        pass
-
-    projection_utils.rollback_projection_materials(registry)
-
-    for name in registry.get('temp_objects', []):
-        try:
-            obj = bpy.data.objects.get(name)
-            if obj:
-                data = obj.data
-                obj_type = obj.type
-                bpy.data.objects.remove(obj, do_unlink=True)
-                if data and data.users == 0:
-                    if obj_type == 'MESH':
-                        bpy.data.meshes.remove(data)
-                    elif obj_type == 'CAMERA':
-                        bpy.data.cameras.remove(data)
-        except Exception as e:
-            print(f"[GEMINI] Cleanup object error: {e}")
-
-    for name in registry.get('temp_materials', []):
-        try:
-            mat = bpy.data.materials.get(name)
-            if mat:
-                bpy.data.materials.remove(mat)
-        except Exception as e:
-            print(f"[GEMINI] Cleanup material error: {e}")
-
-    temp_dir = registry.get('temp_dir')
-    if temp_dir and os.path.exists(temp_dir) and not debug_mode:
-        if os.path.basename(temp_dir).startswith("gemini_proj_"):
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
-    try:
-        bpy.ops.object.select_all(action='DESELECT')
-        for name in registry.get('original_selected_objs', []):
-            obj = bpy.data.objects.get(name)
-            if obj:
-                obj.select_set(True)
-        active_name = registry.get('original_active_obj')
-        if active_name and active_name in bpy.data.objects:
-            bpy.context.view_layer.objects.active = bpy.data.objects[active_name]
-        if registry.get('restore_edit'):
-            bpy.ops.object.mode_set(mode='EDIT')
-    except Exception as e:
-        print(f"[GEMINI] Cleanup selection restore error: {e}")
-
-
 # ---------------------------------------------------------------------------
 # Main projection operator
 # ---------------------------------------------------------------------------
 
 class GEMINI_OT_texture_projection(Operator):
-    """Capture the view, generate a texture with AI and project it onto the selection"""
+    """Capture the view, generate a texture with AI and project it onto the selection.
+
+    Runs FULLY SYNCHRONOUSLY on purpose: capture, API call, projection and
+    bake all happen inline in this execute(). Blender's UI blocks while it
+    works, but nothing can deadlock — every threaded/timer/modal variant
+    of this pipeline eventually froze Blender around the blocking bake.
+    """
     bl_idname = "gemini.texture_projection"
     bl_label = "AI Texture Projection"
     bl_description = ("One click: capture the current view, generate a texture "
-                      "and project/bake it onto the selected meshes")
+                      "and project/bake it onto the selected meshes "
+                      "(Blender stays busy until it finishes)")
     bl_options = {'REGISTER', 'UNDO'}
-
-    current_thread = None
 
     @classmethod
     def poll(cls, context):
-        if any(o.type == 'MESH' for o in context.selected_objects):
+        if context.mode == 'EDIT_MESH':
             return True
-        obj = context.active_object
-        return obj is not None and obj.type == 'MESH'
+        return any(o.type == 'MESH' and '_MaskTemp' not in o.name
+                   for o in context.selected_objects)
 
     def execute(self, context):
         scene = context.scene
         props = scene.gemini_render
 
-        cls = GEMINI_OT_texture_projection
-        if cls.current_thread and cls.current_thread.is_alive():
+        if props.is_rendering:
             self.report({'WARNING'}, "A projection is already running")
             return {'CANCELLED'}
 
@@ -217,7 +167,8 @@ class GEMINI_OT_texture_projection(Operator):
             'original_selected_objs': [o.name for o in context.selected_objects],
             'restore_edit': False,
         }
-        started = False
+        applied = False
+        success = False
 
         try:
             projection_utils.validate_projection(context)
@@ -350,37 +301,51 @@ class GEMINI_OT_texture_projection(Operator):
             finally:
                 _restore_render_state(scene, saved_render)
 
-            # --- Launch the background job ------------------------------
-            api_client = gemini_api.GeminiAPI(
-                gemini_api.get_api_key() or "", props.model_name)
-
-            thread = threading_utils.ProjectionRenderThread(
-                context=context,
-                api_client=api_client,
-                user_prompt=props.prompt,
-                source_path=source_path,
-                sim_path=sim_path,
-                target_objects_data=registry['target_objects_data'],
-                do_bake=props.projection_bake,
-                bypass_api=bypass_api,
-                mask_repair_data=mask_repair_data,
-                input_source=props.input_source,
-                debug_mode=props.debug_mode,
-                source_image_override=source_image_override,
-                cam_data=cam_data,
-                reference_path=reference_path,
-                capture_width=width,
-                capture_height=height,
-                temp_dir=temp_dir,
-                resource_registry=registry,
-            )
-            cls.current_thread = thread
+            # --- Generate + apply + bake, fully synchronous --------------
             props.is_rendering = True
-            props.status_text = "Processing..."
-            thread.start()
-            started = True
 
-            self.report({'INFO'}, f"AI projection started ({processed} objects)")
+            if source_image_override is not None:
+                res_img = source_image_override
+            else:
+                if bypass_api:
+                    with open(sim_path, 'rb') as f:
+                        image_data = f.read()
+                else:
+                    props.status_text = "Contacting Gemini..."
+                    api_client = gemini_api.GeminiAPI(
+                        gemini_api.get_api_key() or "", props.model_name)
+                    image_data, _mime = api_client.generate_image(
+                        depth_image_path=source_path,
+                        user_prompt=props.prompt,
+                        reference_image_path=reference_path,
+                        width=width, height=height,
+                        is_color_render=(props.input_source == 'COLOR'))
+                    if props.debug_mode:
+                        try:
+                            with open(os.path.join(temp_dir, "debug_output.png"),
+                                      'wb') as f:
+                                f.write(image_data)
+                        except OSError as e:
+                            print(f"[GEMINI] Debug save failed: {e}")
+
+                res_img = threading_utils.load_result_image(
+                    image_data, "Gemini_Projection_Result",
+                    props.prompt, cam_data)
+                if not res_img:
+                    raise RuntimeError("Failed to load the generated image")
+
+            threading_utils.apply_result_to_materials(
+                registry['target_objects_data'], res_img)
+            applied = True
+
+            if props.projection_bake:
+                props.status_text = "Baking..."
+                threading_utils.bake_targets(
+                    context, registry['target_objects_data'],
+                    mask_repair_data, res_img)
+
+            success = True
+            self.report({'INFO'}, f"Projection finished ({processed} objects)")
             return {'FINISHED'}
 
         except Exception as e:
@@ -389,9 +354,13 @@ class GEMINI_OT_texture_projection(Operator):
             traceback.print_exc()
             return {'CANCELLED'}
         finally:
-            if not started:
-                _cleanup_registry(registry, props.debug_mode)
-                props.is_rendering = False
+            # Always tear down temp objects/materials/dirs; roll the
+            # material assignment back unless a valid result was applied
+            # (prevents black projection materials on API errors).
+            threading_utils.finalize_projection(
+                registry, debug_mode=props.debug_mode, rollback=not applied)
+            props.is_rendering = False
+            props.status_text = "Done" if success else "Failed (see error)"
 
     # -- helpers ------------------------------------------------------------
 
@@ -498,46 +467,21 @@ class GEMINI_OT_texture_projection(Operator):
 # Control / utility operators
 # ---------------------------------------------------------------------------
 
-class GEMINI_OT_stop_render(Operator):
-    """Stop the current AI operation"""
-    bl_idname = "gemini.stop_render"
-    bl_label = "Stop Processing"
-    bl_description = "Stop the current AI projection or render operation"
-    bl_options = {'REGISTER'}
-
-    def execute(self, context):
-        props = context.scene.gemini_render
-        cls = GEMINI_OT_texture_projection
-        if cls.current_thread and cls.current_thread.is_alive():
-            cls.current_thread.stop()
-            cls.current_thread = None
-        threading_utils.stop_all_projection_threads()
-        props.is_rendering = False
-        props.status_text = "Cancelled by user"
-        self.report({'INFO'}, "AI processing stopped")
-        return {'FINISHED'}
-
-
 class GEMINI_OT_reset_state(Operator):
-    """Force-reset the addon state if the UI gets stuck"""
+    """Force-reset the addon state if the UI flags get stuck"""
     bl_idname = "gemini.reset_state"
     bl_label = "Reset UI State"
-    bl_description = "Force reset render state and stop all threads"
+    bl_description = "Force reset the busy flags and status"
     bl_options = {'REGISTER'}
 
     def execute(self, context):
         props = context.scene.gemini_render
-        threading_utils.stop_all_projection_threads()
-        cls = GEMINI_OT_texture_projection
-        if cls.current_thread:
-            cls.current_thread.stop()
-            cls.current_thread = None
         props.is_rendering = False
         props.status_text = "Ready"
         for area in context.screen.areas:
             if area.type == 'VIEW_3D':
                 area.tag_redraw()
-        self.report({'INFO'}, "State reset, all threads stopped")
+        self.report({'INFO'}, "State reset")
         return {'FINISHED'}
 
 
